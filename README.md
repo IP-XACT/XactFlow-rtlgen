@@ -3,9 +3,10 @@
 A [XactFlow](https://github.com/IP-XACT/XactFlow) exporter plugin that generates a
 SystemVerilog top-level module from an IEEE 1685-2022 (IP-XACT) design.
 
-It is being written step by step. Step 1 is done: the plugin is registered with XactFlow as
-the `rtl` subcommand, links the design against its library, names the module from the
-component that holds the design, and writes an empty module. Instances, parameters and
+It is being written step by step. Steps 1 and 2 are done: the plugin is registered with
+XactFlow as the `rtl` subcommand, links the design against its library, names the module from
+the component that holds the design, and writes the module with one instance per
+subcomponent, each named after the module its component gives. Ports, parameters and
 connections come in the next steps.
 
 ## Use
@@ -16,8 +17,9 @@ xactflow rtl <design.xml> --lib <dir> [--lib <dir> ...] --output <dir>
 ```
 
 It writes `<module>.sv` into the output folder. It refuses, with a message, anything it does
-not handle yet: options, design configurations, a design that does not link, or a module name
-it cannot find (see `docs/decisions.md`).
+not handle yet: options, design configurations, a design that does not link, a module name
+it cannot find, a hierarchical or virtual subcomponent, or one in a language other than
+SystemVerilog (see `docs/decisions.md`).
 
 ## Docs
 

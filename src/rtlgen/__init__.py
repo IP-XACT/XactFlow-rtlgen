@@ -4,7 +4,8 @@ from pathlib import Path
 import ipxact
 import xactflow
 
-# A simple SystemVerilog identifier (IEEE 1800 5.6). Keywords are not checked yet (D1 item 5).
+# A simple SystemVerilog identifier (IEEE 1800 5.6): the form every name rtlgen writes must
+# have. Keywords are not checked yet (D5).
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 # The start of the first line of every file rtlgen writes, and the only kind of file it
@@ -35,10 +36,11 @@ class RtlExporter(xactflow.Exporter):
 			raise ValueError("the design does not link: " + "; ".join(d.message for d in errors))
 
 		module_name = _module_name(linked)
+		instances = _instance_lines(linked)
 
 		output_dir = Path(output_dir)
 		output_dir.mkdir(parents=True, exist_ok=True)
-		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\nmodule {module_name};\nendmodule\n"
+		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\nmodule {module_name};\n{instances}endmodule\n"
 		_write(output_dir / f"{module_name}.sv", text)
 
 
@@ -53,6 +55,27 @@ def _write(path, text):
 				f"'{_MARKER} ...'): not overwriting it"
 			)
 	path.write_text(text)
+
+
+def _check_name(name, what):
+	"""Refuse a name rtlgen would write unless it is a simple SystemVerilog identifier (D5)."""
+	if not _IDENTIFIER.fullmatch(name):
+		raise ValueError(
+			f"{what} is not a legal SystemVerilog identifier: a letter or _, then letters, "
+			"digits, _ or $"
+		)
+
+
+def _instance_lines(linked):
+	"""One line per instance, in design order: '  <module> <instance> ();' (step 2)."""
+	lines = ""
+	for instance in linked.instances.values():
+		_check_name(
+			instance.instance_name,
+			f"instance name '{instance.instance_name}' in design {linked.vlnv}",
+		)
+		lines += f"  {_instance_module_name(instance)} {instance.instance_name} ();\n"
+	return lines
 
 
 def _module_name(linked):
@@ -77,18 +100,7 @@ def _module_name(linked):
 		where = f"view '{view.name}' of component {component.vlnv}"
 		if view.component_instantiation_ref is None:
 			raise ValueError(f"{where} has no componentInstantiationRef, so it names no module")
-		component_instantiation = component_instantiations.get(view.component_instantiation_ref)
-		if component_instantiation is None:
-			raise ValueError(
-				f"{where} refers to component instantiation "
-				f"'{view.component_instantiation_ref}', which the component does not have"
-			)
-		if not component_instantiation.module_name:
-			raise ValueError(
-				f"component instantiation '{component_instantiation.name}' of {where} "
-				"has no moduleName"
-			)
-		names[view.name] = component_instantiation.module_name
+		names[view.name] = _component_instantiation(view, component_instantiations, where).module_name
 
 	if not names:  # D1 item 6
 		raise ValueError(
@@ -102,9 +114,74 @@ def _module_name(linked):
 			f"different module names: {listed}"
 		)
 	module_name = next(iter(names.values()))
-	if not _IDENTIFIER.fullmatch(module_name):  # D1 item 5
-		raise ValueError(
-			f"module name '{module_name}' from component {component.vlnv} is not a legal "
-			"SystemVerilog identifier: a letter or _, then letters, digits, _ or $"
-		)
+	_check_name(module_name, f"module name '{module_name}' from component {component.vlnv}")
 	return module_name
+
+
+def _instance_module_name(instance):
+	"""The module an instance instantiates: the moduleName its component gives through its
+	views with a componentInstantiationRef (D4)."""
+	component = instance.component
+	model = component.model or ipxact.Model()
+	component_instantiations = {i.name: i for i in model.component_instantiations}
+	who = f"component {component.vlnv} (instance '{instance.instance_name}')"
+
+	# A view that instantiates a design makes the component hierarchical, which waits for
+	# step 8, whichever view would give the module name.
+	for view in model.views:
+		if view.design_instantiation_ref or view.design_configuration_instantiation_ref:
+			raise ValueError(
+				f"view '{view.name}' of {who} instantiates a design, so the component is "
+				"hierarchical: hierarchical components are not supported yet"
+			)
+
+	# View name -> module name, for each view with a componentInstantiationRef. A view with
+	# none (documentation, say) is skipped.
+	names = {}
+	for view in model.views:
+		if view.component_instantiation_ref is None:
+			continue
+		where = f"view '{view.name}' of {who}"
+		component_instantiation = _component_instantiation(view, component_instantiations, where)
+		# Only SystemVerilog, compared ignoring case. A missing language is accepted.
+		language = (component_instantiation.language or "").strip()
+		if language and language.lower() != "systemverilog":
+			raise ValueError(
+				f"component instantiation '{component_instantiation.name}' of {where} is in "
+				f"language '{language}': only SystemVerilog is supported"
+			)
+		# IEEE 1685-2022: a virtual component "shall not be netlisted". Refused for now.
+		if component_instantiation.is_virtual:
+			raise ValueError(
+				f"component instantiation '{component_instantiation.name}' of {where} is virtual "
+				"(isVirtual): virtual components are not supported yet"
+			)
+		names[view.name] = component_instantiation.module_name
+
+	if not names:
+		raise ValueError(
+			f"no view of {who} has a componentInstantiationRef, so nothing names its module"
+		)
+	if len(set(names.values())) > 1:
+		listed = ", ".join(f"view '{view}' gives '{name}'" for view, name in names.items())
+		raise ValueError(f"the views of {who} give different module names: {listed}")
+	module_name = next(iter(names.values()))
+	_check_name(module_name, f"module name '{module_name}' of {who}")
+	return module_name
+
+
+def _component_instantiation(view, component_instantiations, where):
+	"""The component instantiation a view's componentInstantiationRef names, refusing one that
+	does not exist or gives no moduleName (D1 item 3, and D4 for instances)."""
+	component_instantiation = component_instantiations.get(view.component_instantiation_ref)
+	if component_instantiation is None:
+		raise ValueError(
+			f"{where} refers to component instantiation "
+			f"'{view.component_instantiation_ref}', which the component does not have"
+		)
+	if not component_instantiation.module_name:
+		raise ValueError(
+			f"component instantiation '{component_instantiation.name}' of {where} "
+			"has no moduleName"
+		)
+	return component_instantiation

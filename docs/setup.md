@@ -57,10 +57,13 @@ source .venv/bin/activate
 EX=$RTLGEN_EXAMPLE
 LIBS="--lib $EX/xml_to_design --lib $EX/bus_definitions --lib build/soc_a"
 xactflow rtl build/soc_a/example.org_design_soc_a.design_1.0.xml $LIBS --output build/soc_a/rtl
-verilator --lint-only -Wall build/soc_a/rtl/*.sv
+verilator --lint-only -Wno-PINMISSING --top-module soc_a build/soc_a/rtl/soc_a.sv $EX/sv_to_design/*.sv
 ```
 
-The input files and `RTLGEN_EXAMPLE` are described in `inputs.md`.
+The input files and `RTLGEN_EXAMPLE` are described in `inputs.md`. Verilator needs the
+example's RTL of the five leaves (`$EX/sv_to_design/`) to check the instances against.
+`-Wno-PINMISSING` stays until the ports are connected (steps 4 to 7). `-Wall` is left out: it
+warns about unused and undriven signals inside the example's leaves, not in the output.
 
 ## Git
 

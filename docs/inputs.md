@@ -42,6 +42,13 @@ The exporter never reads `design.py`, only the XML.
 They are not copied: a copy goes stale when the author updates the original, and two files
 with the same VLNV in the library are an error (SCR 1.1).
 
+## Leaf RTL (in the example, for linting only)
+
+`$EX/sv_to_design/*.sv` holds the SystemVerilog of the five leaves (`cpu`, `apb_interconnect`,
+`uart`, `gpio`, `debug`). The exporter never reads it. From step 2 Verilator reads it with the
+output, so a wrong module name, and later a wrong port or parameter, fails the lint (see
+`setup.md`).
+
 ## Generated files (in `build/soc_a/`)
 
 | File                                         | What it holds                                                                | Used in    |

@@ -6,7 +6,7 @@ entry, and the old one is marked superseded rather than edited.
 ---
 
 ## D1. Where the module name comes from
-*2026-11-18 · active*
+*2026-11-18 · active · item 5 superseded by D5 (2026-11-19)*
 
 - **Decision:** the module name is the `moduleName` that the containing component gives through
   the view instantiating the exported design. Every case where that is missing or unclear is
@@ -22,9 +22,9 @@ entry, and the old one is marked superseded rather than edited.
      naming the component, the view and what is missing.
   4. Several views instantiate the design: accepted if they all give the same module name,
      refused if the names differ. Each matching view must give a name, as in 3.
-  5. The name is not a legal SystemVerilog identifier: a name not of the simple identifier form
-     (a letter or `_`, then letters, digits, `_` or `$`; IEEE 1800 5.6) is refused. Keywords are
-     not checked yet.
+  5. *Superseded by D5, which applies it to every name rtlgen writes.* The name is not a legal
+     SystemVerilog identifier: a name not of the simple identifier form (a letter or `_`, then
+     letters, digits, `_` or `$`; IEEE 1800 5.6) is refused. Keywords are not checked yet.
   6. The containing component has no view whose `designInstantiationRef` leads to the design (it
      holds the design through a design configuration instead, which `link()` also accepts):
      refused, as design configurations are.
@@ -65,7 +65,7 @@ entry, and the old one is marked superseded rather than edited.
   - A keyword as a name turns out to reach users: check against the keyword list of one IEEE 1800
     version (Annex B).
   - Step 2 needs the same check for instance names: move item 5 to an entry of its own, for every
-    name the exporter writes.
+    name the exporter writes. Done: D5.
 
 ## D2. Only files rtlgen wrote are overwritten
 *2026-11-18 · active*
@@ -99,3 +99,69 @@ entry, and the old one is marked superseded rather than edited.
   default path to a local clone: no setup on one machine, but it ties the repository to it.
 - **Revisit if:** the tests should run in CI: clone the example there and set `RTLGEN_EXAMPLE`,
   or build the inputs in Python, or use an input whose licence allows copying it.
+
+## D4. Where an instance's module name comes from
+*2026-11-19 · active*
+
+- **Decision:** each instance is written as `<module> <instance name> ();`, in design order,
+  where `<module>` is the `moduleName` that the instance's component gives through its view with
+  a `componentInstantiationRef`. Every case where that is missing, unclear or not supported yet
+  is refused.
+  1. Which view gives the module name: each view with a `componentInstantiationRef`. A view with
+     no reference at all (documentation, say) is ignored.
+  2. A component with any view that has a `designInstantiationRef` or a
+     `designConfigurationInstantiationRef` is hierarchical: refused until step 8, whichever view
+     would give the name.
+  3. The reference names no component instantiation, or the component instantiation has no
+     `moduleName`: refused, as in D1 item 3, with a message naming the component, the instance
+     and the view.
+  4. No view has a `componentInstantiationRef`, or the component has no model: refused.
+  5. Several views have one: accepted if they all give the same module name, refused if the
+     names differ. Each must pass 3, 6 and 7.
+  6. `language`: `systemverilog`, compared ignoring case and surrounding spaces, is accepted, and
+     so is a missing or empty `language`. Any other language (`verilog`, `vhdl`, ...) is refused.
+  7. `isVirtual` true: refused. IEEE 1685-2022 says such a component "shall not be netlisted",
+     and what that means for its connections is not decided yet.
+  8. The module name must be a legal identifier (D5).
+- **Why:** as in D1, the name must be one the input states, never a guess, and a refusal can be
+  loosened later. The view with a `componentInstantiationRef` is where IP-XACT puts the module,
+  so the top (D1) and the instances follow one rule. Refusing hierarchical components leaves
+  step 8 free to decide how sub-designs are generated, and costs nothing on the example, which
+  has none. rtlgen considers only SystemVerilog input files and always writes SystemVerilog, so
+  any other stated language is refused. `language` is optional in IEEE 1685-2022, so leaving it
+  out is not refused. No input at hand sets `isVirtual`, so refusing it costs nothing either.
+- **Considered:**
+  1. The view named `rtl`: view names are free text, and the example's are `rtl_view`, so it
+     would refuse the example. The first view: a silent guess when a component has several.
+  2. Instantiating a hierarchical component by its `moduleName` and expecting its RTL from
+     elsewhere (a separate rtlgen run): a missing module would fail loudly at build time, but
+     it fixes how step 8 works before step 8.
+  6. Accepting `verilog` as well: rtlgen is SystemVerilog only. Refusing a missing `language`:
+     chosen first, then dropped the same day: the element is optional, and Croc leaves it out on
+     all 20 of its component instantiations. Not checking `language`: a VHDL leaf would be
+     written as SystemVerilog and found only when the build fails.
+  7. Leaving a virtual instance out, as the standard says: from step 4 on, connections to it
+     would point at nothing. Ignoring `isVirtual`: wrong RTL with no error.
+- **Revisit if:**
+  - Hierarchy is supported (step 8): accept 2.
+  - Real SoCs (step 9): Didactic writes `Verilog` on its 30 component instantiations, so 6
+    refuses Didactic. Decide again then.
+  - A real input sets `isVirtual`: decide what a virtual instance means for its connections (7).
+  - A real input has a component whose views give different module names: an option to pick the
+    view, or the view a design configuration chooses (step 8).
+
+## D5. Every name rtlgen writes is a simple identifier
+*2026-11-19 · active*
+
+- **Decision:** every name the exporter writes into SystemVerilog must be a simple identifier: a
+  letter or `_`, then letters, digits, `_` or `$` (IEEE 1800 5.6). Any other name is refused,
+  with a message saying which name it is and where it comes from. Keywords are not checked yet.
+  This replaces D1 item 5. From step 2 it covers the module name (D1), each instance's module
+  name (D4) and each instance name; later steps add their names here, not a rule of their own.
+- **Why:** one rule in one place: a new kind of name needs no new decision, and copies of a rule
+  cannot drift apart. The reasons against escaped identifiers, repairing names and checking
+  keywords are those of D1 (considered, 5).
+- **Considered:** the rule repeated in each decision (D1 item 5, then a copy in D4, and one in
+  every later step): the same text many times over.
+- **Revisit if:** a keyword as a name turns out to reach users: check against the keyword list of
+  one IEEE 1800 version (Annex B).

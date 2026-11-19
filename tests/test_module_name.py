@@ -64,19 +64,19 @@ def test_two_views_with_different_names_are_refused(linked):  # item 4
 
 
 @pytest.mark.parametrize("name", ["soc.a", "2soc", "soc-a", "soc a", "$soc"])
-def test_name_of_bad_form_is_refused(linked, name):  # item 5
+def test_name_of_bad_form_is_refused(linked, name):  # D5 (was D1 item 5)
 	_model(linked).component_instantiations[0].module_name = name
 	with pytest.raises(ValueError, match="is not a legal SystemVerilog identifier"):
 		_module_name(linked)
 
 
 @pytest.mark.parametrize("name", ["_soc", "soc$a", "SoC_2"])
-def test_name_of_good_form_is_accepted(linked, name):  # item 5
+def test_name_of_good_form_is_accepted(linked, name):  # D5 (was D1 item 5)
 	_model(linked).component_instantiations[0].module_name = name
 	assert _module_name(linked) == name
 
 
-def test_keyword_is_not_checked_yet(linked):  # item 5, deferred
+def test_keyword_is_not_checked_yet(linked):  # D5 (was D1 item 5), deferred
 	_model(linked).component_instantiations[0].module_name = "module"
 	assert _module_name(linked) == "module"
 
