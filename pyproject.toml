@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtlgen"
+version = "0.0.1"
+description = "XactFlow exporter plugin that generates a SystemVerilog top-level module from an IP-XACT design."
+readme = "README.md"
+license = "LGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = [
+	"xactflow>=0.4.0,<0.5",
+	"ipxact-compiler>=0.2.0",
+]
+
+[project.entry-points."xactflow.exporters"]
+rtl = "rtlgen:RtlExporter"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
