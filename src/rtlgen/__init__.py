@@ -129,6 +129,11 @@ def _module_parameter_lines(instance, instantiation):
 def _module_parameter_value(parameter, resolve, instance):
 	"""A module parameter's value as written: as it stands when it refers to no parameter,
 	else worked out by XactFlow's evaluator and written as plain decimal (D7)."""
+	if parameter.usage_type not in ("typed", None):
+		raise ValueError(
+			f"instance '{instance.instance_name}': module parameter '{parameter.name}' has "
+			f"usageType '{parameter.usage_type}': only typed module parameters are supported"
+		)
 	text = parameter.value.value.strip()
 	if not _IDENTIFIER.search(_NOT_A_PARAMETER.sub(" ", text)):
 		return text
