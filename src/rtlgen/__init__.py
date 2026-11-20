@@ -1,3 +1,4 @@
+import dataclasses
 import re
 from pathlib import Path
 
@@ -7,6 +8,17 @@ import xactflow
 # A simple SystemVerilog identifier (IEEE 1800 5.6): the form every name rtlgen writes must
 # have. Keywords are not checked yet (D5).
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+# What in an expression looks like a name but is not a parameter: strings, based literals
+# (8'hA5, 'hFF, '1), numbers (1e5) and $functions. A value with any other name in it refers
+# to a parameter (D7).
+_NOT_A_PARAMETER = re.compile(
+	r'"(?:[^"\\]|\\.)*"'
+	r"|(?:\d[\d_]*\s*)?'[sS]?[bBoOdDhH]\s*[0-9a-fA-FxXzZ?_]+"
+	r"|'[01xXzZ]"
+	r"|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?"
+	r"|\$[A-Za-z_][A-Za-z0-9_$]*"
+)
 
 # The start of the first line of every file rtlgen writes, and the only kind of file it
 # overwrites (D2).
@@ -67,15 +79,53 @@ def _check_name(name, what):
 
 
 def _instance_lines(linked):
-	"""One line per instance, in design order: '  <module> <instance> ();' (step 2)."""
+	"""Each instance, in design order: '  <module> <instance> ();', with its module parameters
+	one per line in '#( ... )' when it has any (steps 2 and 3)."""
 	lines = ""
 	for instance in linked.instances.values():
 		_check_name(
 			instance.instance_name,
 			f"instance name '{instance.instance_name}' in design {linked.vlnv}",
 		)
-		lines += f"  {_instance_module_name(instance)} {instance.instance_name} ();\n"
+		instantiation = _instance_instantiation(instance)
+		parameters = _module_parameter_lines(instance, instantiation)
+		if parameters:
+			lines += f"  {instantiation.module_name} #(\n" + ",\n".join(parameters)
+			lines += f"\n  ) {instance.instance_name} ();\n"
+		else:
+			lines += f"  {instantiation.module_name} {instance.instance_name} ();\n"
 	return lines
+
+
+def _module_parameter_lines(instance, instantiation):
+	"""'    .<name>(<value>)' for every module parameter of the instantiation, in its order, with
+	its value in this design (D6, D7)."""
+	# The component's parameters, each with the design's override for this instance in place
+	# of its value. The override replaces only the text: the limits stay the parameter's.
+	overrides = instance.source.component_ref.config_element_values
+	parameters = [
+		dataclasses.replace(
+			parameter,
+			value=dataclasses.replace(parameter.value, value=overrides[parameter.parameter_id].value),
+		)
+		if parameter.parameter_id in overrides
+		else parameter
+		for parameter in instance.component.parameters
+	]
+	resolve = xactflow.parameter_resolver(parameters)
+	return [
+		f"    .{parameter.name}({_module_parameter_value(parameter, resolve)})"
+		for parameter in instantiation.module_parameters
+	]
+
+
+def _module_parameter_value(parameter, resolve):
+	"""A module parameter's value as written: as it stands when it refers to no parameter,
+	else worked out by XactFlow's evaluator and written as plain decimal (D7)."""
+	text = parameter.value.value.strip()
+	if not _IDENTIFIER.search(_NOT_A_PARAMETER.sub(" ", text)):
+		return text
+	return str(xactflow.evaluate(parameter, resolve))
 
 
 def _module_name(linked):
@@ -118,9 +168,9 @@ def _module_name(linked):
 	return module_name
 
 
-def _instance_module_name(instance):
-	"""The module an instance instantiates: the moduleName its component gives through its
-	views with a componentInstantiationRef (D4)."""
+def _instance_instantiation(instance):
+	"""The component instantiation an instance instantiates: the one its component's views
+	with a componentInstantiationRef lead to, whose moduleName names the module (D4)."""
 	component = instance.component
 	model = component.model or ipxact.Model()
 	component_instantiations = {i.name: i for i in model.component_instantiations}
@@ -135,9 +185,9 @@ def _instance_module_name(instance):
 				"hierarchical: hierarchical components are not supported yet"
 			)
 
-	# View name -> module name, for each view with a componentInstantiationRef. A view with
-	# none (documentation, say) is skipped.
-	names = {}
+	# View name -> component instantiation, for each view with a componentInstantiationRef. A
+	# view with none (documentation, say) is skipped.
+	chosen = {}
 	for view in model.views:
 		if view.component_instantiation_ref is None:
 			continue
@@ -156,18 +206,18 @@ def _instance_module_name(instance):
 				f"component instantiation '{component_instantiation.name}' of {where} is virtual "
 				"(isVirtual): virtual components are not supported yet"
 			)
-		names[view.name] = component_instantiation.module_name
+		chosen[view.name] = component_instantiation
 
-	if not names:
+	if not chosen:
 		raise ValueError(
 			f"no view of {who} has a componentInstantiationRef, so nothing names its module"
 		)
-	if len(set(names.values())) > 1:
-		listed = ", ".join(f"view '{view}' gives '{name}'" for view, name in names.items())
+	if len({i.module_name for i in chosen.values()}) > 1:
+		listed = ", ".join(f"view '{view}' gives '{i.module_name}'" for view, i in chosen.items())
 		raise ValueError(f"the views of {who} give different module names: {listed}")
-	module_name = next(iter(names.values()))
-	_check_name(module_name, f"module name '{module_name}' of {who}")
-	return module_name
+	instantiation = next(iter(chosen.values()))
+	_check_name(instantiation.module_name, f"module name '{instantiation.module_name}' of {who}")
+	return instantiation
 
 
 def _component_instantiation(view, component_instantiations, where):
