@@ -222,6 +222,13 @@ def _instance_instantiation(instance):
 	if len({i.module_name for i in chosen.values()}) > 1:
 		listed = ", ".join(f"view '{view}' gives '{i.module_name}'" for view, i in chosen.items())
 		raise ValueError(f"the views of {who} give different module names: {listed}")
+	parameter_lines = {view: _module_parameter_lines(instance, i) for view, i in chosen.items()}
+	if len({tuple(lines) for lines in parameter_lines.values()}) > 1:
+		listed = "; ".join(
+			f"view '{view}' gives {', '.join(line.strip() for line in lines) or 'none'}"
+			for view, lines in parameter_lines.items()
+		)
+		raise ValueError(f"the views of {who} give different module parameters: {listed}")
 	instantiation = next(iter(chosen.values()))
 	_check_name(instantiation.module_name, f"module name '{instantiation.module_name}' of {who}")
 	return instantiation
