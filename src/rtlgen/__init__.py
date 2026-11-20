@@ -100,9 +100,16 @@ def _instance_lines(linked):
 def _module_parameter_lines(instance, instantiation):
 	"""'    .<name>(<value>)' for every module parameter of the instantiation, in its order, with
 	its value in this design (D6, D7)."""
+	overrides = instance.source.component_ref.config_element_values
+	parameter_ids = {p.parameter_id for p in instance.component.parameters}
+	for reference_id in overrides:
+		if reference_id not in parameter_ids:
+			raise ValueError(
+				f"instance '{instance.instance_name}' overrides '{reference_id}', which is not "
+				f"a parameter of component {instance.component.vlnv}"
+			)
 	# The component's parameters, each with the design's override for this instance in place
 	# of its value. The override replaces only the text: the limits stay the parameter's.
-	overrides = instance.source.component_ref.config_element_values
 	parameters = [
 		dataclasses.replace(
 			parameter,
