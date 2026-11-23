@@ -120,6 +120,17 @@ def _module_parameter_lines(instance, instantiation):
 		for parameter in instance.component.parameters
 	]
 	resolve = xactflow.parameter_resolver(parameters)
+	names = set()
+	for parameter in instantiation.module_parameters:
+		_check_name(
+			parameter.name,
+			f"module parameter name '{parameter.name}' of instance '{instance.instance_name}'"
+		)
+		if parameter.name in names:
+			raise ValueError(
+				f"instance '{instance.instance_name}' gives module parameter '{parameter.name}' twice"
+			)
+		names.add(parameter.name)
 	return [
 		f"    .{parameter.name}({_module_parameter_value(parameter, resolve, instance)})"
 		for parameter in instantiation.module_parameters
