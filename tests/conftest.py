@@ -40,14 +40,14 @@ class Example:
 
 @pytest.fixture
 def example():
-	"""The example's input files. Skips when they are missing (see docs/inputs.md)."""
+	"""The example's input files. Skips when they are missing (see README.md, Tests)."""
 	if EXAMPLE is None:
-		pytest.skip("RTLGEN_EXAMPLE is not set: point it at a clone of the example (docs/inputs.md)")
+		pytest.skip("RTLGEN_EXAMPLE is not set: point it at a clone of the example (README.md, Tests)")
 	if not (EXAMPLE / "xml_to_design").is_dir():
 		pytest.skip(f"the example is not at {EXAMPLE} (RTLGEN_EXAMPLE)")
 	design_file = GENERATED / "example.org_design_soc_a.design_1.0.xml"
 	if not design_file.is_file():
-		pytest.skip(f"{design_file} is missing: generate it as docs/inputs.md says")
+		pytest.skip(f"{design_file} is missing: generate it as README.md (Tests) says")
 	return Example(
 		libs=[EXAMPLE / "xml_to_design", EXAMPLE / "bus_definitions", GENERATED],
 		generated=GENERATED,

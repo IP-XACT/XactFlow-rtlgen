@@ -23,19 +23,32 @@ SystemVerilog (see `docs/decisions.md`).
 
 ## Docs
 
-- `docs/setup.md`: the development setup and how to run it.
-- `docs/inputs.md`: the example design used as input, and how to generate it.
 - `docs/decisions.md`: the decisions that shape the exporter, why they were made, and what
   would reopen them.
 
 ## Tests
 
+The tests read the XactFlow author's example design, `soc_a`, from the clone that
+`RTLGEN_EXAMPLE` names, and skip when it is not set or the generated files are missing (D3).
+The example has no licence file, so nothing from it, nor generated from it, goes into this
+repository: the generated files live in `build/`, which git ignores.
+
 ```bash
+pip install -e . pytest xactflow-archidesc==0.3.1 xactflow-design==0.2.1 xactflow-component==0.2.1
+git clone https://github.com/mtravaillard/example_XactFlow.git ../example_XactFlow
+export RTLGEN_EXAMPLE=$(realpath ../example_XactFlow)
+
+# The design and the component holding it, into build/soc_a. Rerun when the example changes.
+OUT=$PWD/build/soc_a
+cd "$RTLGEN_EXAMPLE/xml_to_design"
+xactflow archidesc design.py --then design    --output "$OUT"
+xactflow archidesc design.py --then component --output "$OUT"
+cd -
+
 pytest -q
 ```
 
-The tests read the XactFlow author's example design from the clone that `RTLGEN_EXAMPLE`
-names (see `docs/inputs.md`), and skip when it is not set or the files are missing.
+archidesc 0.3.0 writes a component that D1 refuses, so use 0.3.1.
 
 ## Licence
 
