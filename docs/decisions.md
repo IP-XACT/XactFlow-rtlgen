@@ -157,7 +157,8 @@ entry, and the old one is marked superseded rather than edited.
   letter or `_`, then letters, digits, `_` or `$` (IEEE 1800 5.6). Any other name is refused,
   with a message saying which name it is and where it comes from. Keywords are not checked yet.
   This replaces D1 item 5. From step 2 it covers the module name (D1), each instance's module
-  name (D4) and each instance name; later steps add their names here, not a rule of their own.
+  name (D4) and each instance name; from step 3 each module parameter name (D6); later steps
+  add their names here, not a rule of their own.
 - **Why:** one rule in one place: a new kind of name needs no new decision, and copies of a rule
   cannot drift apart. The reasons against escaped identifiers, repairing names and checking
   keywords are those of D1 (considered, 5).
@@ -165,3 +166,114 @@ entry, and the old one is marked superseded rather than edited.
   every later step): the same text many times over.
 - **Revisit if:** a keyword as a name turns out to reach users: check against the keyword list of
   one IEEE 1800 version (Annex B).
+
+## D6. Which module parameters are written
+*2026-11-19 · active*
+
+- **Decision:** an instance whose component instantiation (D4) has module parameters is written
+  as `<module> #( ... ) <instance name> ();`, with one `.<name>(<value>)` per line for every
+  module parameter, in the instantiation's order, each with its value in this design (D7).
+  What rtlgen cannot write correctly is refused.
+  1. Which module parameters: all of them, overridden or not. An instantiation with none is
+     written as in D4, without `#( ... )`.
+  2. Overrides: each `configurableElementValue` the design gives the instance replaces the value
+     of the component parameter its `referenceId` names, and only the value: the parameter's
+     limits stay. An override naming no parameter of the component is refused. That also
+     refuses an override naming a module parameter directly, which SCR 5.3 forbids.
+  3. An override of a parameter with `resolve="immediate"` is applied, not refused: SCR 5.28 is
+     XactFlow's to check.
+  4. Several views that D4 accepts: their instantiations must give the same parameter lines,
+     compared once the values are worked out, or they are refused.
+  5. `usageType`: only `typed` maps to a SystemVerilog module parameter (IEEE 1685-2022
+     Tables 4 and 5). `nontyped` and `runtime` are refused for now. A missing `usageType` is
+     `typed`, the schema's default and what ipxact-compiler gives.
+  6. Names: each module parameter name must be a legal identifier (D5). A name given twice in
+     one instantiation is refused (IEEE 1685-2022 6.15.6.2 b); SystemVerilog does not allow a
+     parameter connected twice either.
+  7. Limits and choices: rtlgen adds no checks of its own. The Semantic Consistency Rules are
+     XactFlow's to implement. The evaluator's own minimum and maximum check, for number types
+     only, still runs on every value rtlgen works out (D7).
+- **Why:** a module parameter that is not overridden still configures the module, and the
+  component's value for it may differ from the default in the RTL, so every one is written.
+  rtlgen refuses only what it cannot write correctly: a check that would not change the output
+  belongs in XactFlow, where every exporter gets it. The standard does not say which module
+  parameters an exporter writes; 6.15.6.2 calls a module parameter "a name-value pair used to
+  configure the model of this component instance".
+- **Considered:**
+  1. Writing only the overridden module parameters: a bet that every value in the component
+     equals the default in the RTL.
+  3. Refusing an override of an immediate parameter: a check that changes nothing in the
+     output.
+  4. Picking one of the views when their parameters differ: a silent guess, as in D4 item 5.
+  5. Reading a missing `usageType` as `nontyped`, as one reading of the standard's text does:
+     the schema says `typed`.
+  7. Checking `minimum`, `maximum` and `choices` in rtlgen: a second copy of XactFlow's rules.
+- **Revisit if:**
+  - ipxact-compiler keeps both of an override given twice: today it keeps one, so rtlgen
+    cannot see the duplicate.
+  - A real input uses `nontyped` or `runtime` (5), or overrides a module parameter directly, as
+    the example in IEEE 1685-2022 C.6 does despite SCR 5.3 (2).
+  - XactFlow checks overrides against the component itself: the check in 2 can go.
+
+## D7. How a module parameter's value is written
+*2026-11-19 · active*
+
+- **Decision:** a value that refers to no parameter is written exactly as the XML has it. A
+  value that refers to a parameter is worked out by XactFlow's evaluator and written as a plain
+  decimal number.
+  1. Refers to no parameter: once strings, based literals (`8'hA5`, `'1`), numbers (`1e5`) and
+     `$` functions (`$clog2`) are set aside, no name is left. Written as it stands, with
+     surrounding spaces trimmed: `"fast"`, `8'hA5`, `1e5`, `$clog2(256)`.
+  2. Refers to a parameter: a bare name (`BAUDRATE`) or an expression with one (`BAUDRATE*2`,
+     `$clog2(BAUDRATE)`). Worked out with `xactflow.evaluate()` and written in decimal: `9600`,
+     `19200`, `14`.
+  3. A name can only mean a parameter of the instance's own component, with the design's
+     overrides in place (D6 item 2). The design's parameters are refused (D8). The component's
+     instantiation parameters, and module parameters with a `parameterId`, are not reached.
+  4. A parameter with no `type` (the schema's default is `string`) or `type="string"`, whose
+     value is a number, is used as that number, as XactFlow's evaluator does. A real string
+     reached through a parameter is refused.
+  5. A value the evaluator cannot work out (an unknown name, a syntax error, a string, an array,
+     `$ipxact_*`, a circular reference, a value outside its limits) is refused, with a message
+     naming the instance, the module parameter, its text and the evaluator's reason.
+- **Why:** the component's parameters are not names in the generated module, so a value that
+  refers to one cannot be copied into the SystemVerilog: it has to be worked out. XactFlow's
+  evaluator is the one all exporters share, so rtlgen gets its fixes and has no evaluator of its
+  own. Its public `evaluate()` returns only the number, with no width, so plain decimal is what
+  rtlgen can write. A value with no parameter in it is kept as written: copying it cannot be
+  wrong, and working it out could lose what the author wrote, such as a width or a base.
+- **Considered:**
+  2. Writing every value as the XML has it, following only bare names and refusing every
+     computed value (`BAUDRATE*2`): no evaluator. Chosen first, then replaced the same day.
+     Writing a worked-out number with a width (`32'd19200`): `evaluate()` gives no width.
+  4. Reading a parameter with no `type` as a string, as the schema's default says: the
+     example's parameters have no `type`, so the UART would be refused.
+- **Revisit if:**
+  - Real SoCs (step 9) have derived values that the evaluator works out differently from
+    SystemVerilog: its width and sign rules are simpler.
+  - An untyped RTL parameter (`parameter P = 8'hFF`) takes its width from the value it is given:
+    a plain decimal changes that width.
+  - The evaluator gives widths, strings or arrays.
+  - A syntax error in an override is reported with the module parameter's text, not the
+    override's: give the override's text when that misleads.
+
+## D8. The top's own parameters wait for step 8
+*2026-11-19 · active*
+
+- **Decision:** the generated module has no parameters of its own. A top that has any is
+  refused until step 8.
+  1. The design has `<parameters>`: refused.
+  2. A component instantiation that D1 takes the module name from has module parameters:
+     refused.
+  3. The containing component's own `<parameters>` are accepted: nothing is written from them,
+     and with 1 refused, no value can reach them (D7 item 3).
+- **Why:** writing `module <name> #(parameter ...)` means deciding how a parameter is declared
+  (its type and default), and whether an instance's value that refers to a top parameter is
+  written as that name or worked out (D7). Both belong to hierarchy (step 8), where a generated
+  module is itself instantiated with values. Without the refusal, a value that refers to a
+  design parameter would be worked out against the instance's component only, and could
+  silently find a parameter of the same name there. The example has none of these, so the
+  refusal costs nothing.
+- **Considered:** writing the top's parameters now, as declarations: decides step 8 before
+  step 8, and reopens D7.
+- **Revisit if:** hierarchy is supported (step 8).
