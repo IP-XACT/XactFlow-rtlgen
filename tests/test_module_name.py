@@ -85,3 +85,18 @@ def test_no_view_instantiating_the_design_is_refused(linked):  # item 6
 	_model(linked).views[0].design_instantiation_ref = None
 	with pytest.raises(ValueError, match="no view of component .* instantiates design"):
 		_module_name(linked)
+
+
+def test_design_parameters_are_refused(linked):  # D8
+	parameter = copy.copy(linked.instances["uart"].component.parameters[0])
+	linked.design.parameters.append(parameter)
+	with pytest.raises(ValueError, match="parameters of its own"):
+		_module_name(linked)
+
+
+def test_top_module_parameters_are_refused(linked):  # D8
+	uart = linked.instances["uart"].component
+	module_parameter = copy.copy(uart.model.component_instantiations[0].module_parameters[0])
+	linked.component.model.component_instantiations[0].module_parameters.append(module_parameter)
+	with pytest.raises(ValueError, match="gives the top module parameters"):
+		_module_name(linked)

@@ -158,7 +158,13 @@ def _module_parameter_value(parameter, resolve, instance):
 
 
 def _module_name(linked):
-	"""The name of the module generated for a linked design, as D1 decides it."""
+	"""The name of the module generated for a linked design, as D1 decides it. Refuses the
+	top's own parameters (D8)."""
+	if linked.design.parameters:
+		raise ValueError(
+			f"design {linked.vlnv} has parameters of its own: the top's parameters are not "
+			"supported yet"
+		)
 	component = linked.component
 	if component is None:  # D1 item 2
 		raise ValueError(
@@ -179,7 +185,13 @@ def _module_name(linked):
 		where = f"view '{view.name}' of component {component.vlnv}"
 		if view.component_instantiation_ref is None:
 			raise ValueError(f"{where} has no componentInstantiationRef, so it names no module")
-		names[view.name] = _component_instantiation(view, component_instantiations, where).module_name
+		instantiation = _component_instantiation(view, component_instantiations, where)
+		if instantiation.module_parameters:
+			raise ValueError(
+				f"{where} gives the top module parameters: the top's parameters are not "
+				"supported yet"
+			)
+		names[view.name] = instantiation.module_name
 
 	if not names:  # D1 item 6
 		raise ValueError(
