@@ -50,7 +50,10 @@ class RtlExporter(xactflow.Exporter):
 		module_name = _module_name(linked)
 		instances = _instance_lines(linked)
 		nets, _ = _ad_hoc_nets(linked)
-		net_lines = "".join(f"  logic {net};\n" for net in nets)
+		net_lines = "".join(
+			f"  logic [{width - 1}:0] {net};\n" if width > 1 else f"  logic {net};\n"
+			for net, width in nets
+		)
 		if net_lines:
 			net_lines += "\n"
 
@@ -113,22 +116,69 @@ def _instance_lines(linked):
 
 
 def _ad_hoc_nets(linked):
-	"""The ad hoc connections between instances (step 4): their net names in design order, and
-	instance name -> {port name -> net name}. A connection with a top port waits for step 5."""
+	"""The ad hoc connections between instances (step 4): their (net name, width) in design
+	order, and instance name -> {port name -> net name}. A connection with a top port waits for
+	step 5. The ports on a net must have the same width and bit order."""
 	nets = []
 	ports = {}
 	for name, references in linked.ad_hoc_connections.items():
 		if linked.ad_hoc_external_ports.get(name):
 			continue
-		nets.append(name)
+		shapes = []
+		for reference in references:
+			bounds = _port_range(reference.instance, reference.port, _resolver(reference.instance))
+			if bounds is None:
+				width = 1
+			else:
+				left, right = bounds
+				width = abs(left - right) + 1
+			shapes.append((reference, bounds, width))
+		listed = ", ".join(
+			f"{reference.instance.instance_name}.{reference.port.name} "
+			+ (f"[{bounds[0]}:{bounds[1]}]" if bounds else "1 bit")
+			for reference, bounds, width in shapes
+		)
+		if len({width for reference, bounds, width in shapes}) > 1:
+			raise ValueError(
+				f"ad hoc connection '{name}' joins ports of different widths ({listed}): "
+				"part selects are not supported yet"
+			)
+		if len({bounds[0] > bounds[1] for reference, bounds, width in shapes if width > 1}) > 1:
+			raise ValueError(
+				f"ad hoc connection '{name}' joins ports with opposite bit orders ({listed}): "
+				"not supported yet"
+			)
+		nets.append((name, width))
 		for reference in references:
 			ports.setdefault(reference.instance.instance_name, {})[reference.port.name] = name
 	return nets, ports
 
 
-def _module_parameter_lines(instance, instantiation):
-	"""'    .<name>(<value>)' for every module parameter of the instantiation, in its order, with
-	its value in this design (D6, D7)."""
+def _port_range(instance, port, resolve):
+	"""A port's (left, right) bounds, worked out for this instance, or None for a port with no
+	vector (one bit). A port with several vectors is refused for now."""
+	vectors = port.wire.vectors
+	if not vectors:
+		return None
+	if len(vectors) > 1:
+		raise ValueError(
+			f"port '{port.name}' of instance '{instance.instance_name}' has {len(vectors)} "
+			"vectors: multi-dimensional ports are not supported yet"
+		)
+	try:
+		left = xactflow.evaluate(vectors[0].left, resolve)
+		right = xactflow.evaluate(vectors[0].right, resolve)
+	except xactflow.ExpressionError as error:
+		raise ValueError(
+			f"instance '{instance.instance_name}': the range of port '{port.name}' cannot be "
+			f"worked out: {error}"
+		) from error
+	return (left, right)
+
+
+def _resolver(instance):
+	"""The resolver for an instance's values: its component's parameters, with the design's
+	overrides in place (D6 item 2)."""
 	overrides = instance.source.component_ref.config_element_values
 	parameter_ids = {p.parameter_id for p in instance.component.parameters}
 	for reference_id in overrides:
@@ -148,8 +198,14 @@ def _module_parameter_lines(instance, instantiation):
 		else parameter
 		for parameter in instance.component.parameters
 	]
-	resolve = xactflow.parameter_resolver(parameters)
+	return xactflow.parameter_resolver(parameters)
+
+
+def _module_parameter_lines(instance, instantiation):
+	"""'    .<name>(<value>)' for every module parameter of the instantiation, in its order, with
+	its value in this design (D6, D7)."""
 	names = set()
+	resolve = _resolver(instance)
 	for parameter in instantiation.module_parameters:
 		_check_name(
 			parameter.name,
