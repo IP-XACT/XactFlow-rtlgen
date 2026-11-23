@@ -45,7 +45,7 @@ def test_the_example(linked):
 
 
 def test_the_example_lines(linked):  # design order, 2-space indent, as in EXPECTED_SOC_A
-	body = EXPECTED_SOC_A.split("\n", 2)[2]
+	body = EXPECTED_SOC_A.split("\n\n", 1)[1]
 	assert _instance_lines(linked) == body[: -len("endmodule\n")]
 
 
@@ -139,7 +139,7 @@ def test_instance_name_of_bad_form_is_refused(linked, name):  # D5
 @pytest.mark.parametrize("name", ["_cpu", "cpu$1", "Cpu_2"])
 def test_instance_name_of_good_form_is_accepted(linked, name):  # D5
 	_cpu(linked).instance_name = name
-	assert f"  cpu {name} ();\n" in _instance_lines(linked)
+	assert f"  cpu {name} (" in _instance_lines(linked)
 
 
 def test_refused_instance_writes_nothing(library, linked, tmp_path):

@@ -49,10 +49,14 @@ class RtlExporter(xactflow.Exporter):
 
 		module_name = _module_name(linked)
 		instances = _instance_lines(linked)
+		nets, _ = _ad_hoc_nets(linked)
+		net_lines = "".join(f"  logic {net};\n" for net in nets)
+		if net_lines:
+			net_lines += "\n"
 
 		output_dir = Path(output_dir)
 		output_dir.mkdir(parents=True, exist_ok=True)
-		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\nmodule {module_name};\n{instances}endmodule\n"
+		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\nmodule {module_name};\n{net_lines}{instances}endmodule\n"
 		_write(output_dir / f"{module_name}.sv", text)
 
 
@@ -80,7 +84,9 @@ def _check_name(name, what):
 
 def _instance_lines(linked):
 	"""Each instance, in design order: '  <module> <instance> ();', with its module parameters
-	one per line in '#( ... )' when it has any (steps 2 and 3)."""
+	one per line in '#( ... )' and its connected ports one per line in '( ... )', in the
+	component's port order, when it has any (steps 2 to 4)."""
+	_, ports = _ad_hoc_nets(linked)
 	lines = ""
 	for instance in linked.instances.values():
 		_check_name(
@@ -89,12 +95,35 @@ def _instance_lines(linked):
 		)
 		instantiation = _instance_instantiation(instance)
 		parameters = _module_parameter_lines(instance, instantiation)
+		connected = ports.get(instance.instance_name, {})
+		port_lines = [
+			f"    .{port.name}({connected[port.name]})"
+			for port in instance.component.model.ports
+			if port.name in connected
+		]
+		lines += f"  {instantiation.module_name}"
 		if parameters:
-			lines += f"  {instantiation.module_name} #(\n" + ",\n".join(parameters)
-			lines += f"\n  ) {instance.instance_name} ();\n"
+			lines += " #(\n" + ",\n".join(parameters) + "\n  )"
+		lines += f" {instance.instance_name}"
+		if port_lines:
+			lines += " (\n" + ",\n".join(port_lines) + "\n  );\n"
 		else:
-			lines += f"  {instantiation.module_name} {instance.instance_name} ();\n"
+			lines += " ();\n"
 	return lines
+
+
+def _ad_hoc_nets(linked):
+	"""The ad hoc connections between instances (step 4): their net names in design order, and
+	instance name -> {port name -> net name}. A connection with a top port waits for step 5."""
+	nets = []
+	ports = {}
+	for name, references in linked.ad_hoc_connections.items():
+		if linked.ad_hoc_external_ports.get(name):
+			continue
+		nets.append(name)
+		for reference in references:
+			ports.setdefault(reference.instance.instance_name, {})[reference.port.name] = name
+	return nets, ports
 
 
 def _module_parameter_lines(instance, instantiation):
