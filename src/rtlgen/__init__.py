@@ -115,16 +115,46 @@ def _instance_lines(linked):
 	return lines
 
 
+def _ad_hoc_groups(linked):
+	"""The ad hoc connections grouped into nets, where connections that share a port are one net,
+	and each group lists connection names with the net name first."""
+	by_port = {}
+	for name, references in linked.ad_hoc_connections.items():
+		for reference in references:
+			by_port.setdefault((reference.instance.instance_name, reference.port.name), []).append(name)
+	groups = []
+	seen = set()
+	for name in linked.ad_hoc_connections:
+		if name in seen:
+			continue
+		group = [name]
+		seen.add(name)
+		for member in group:
+			for reference in linked.ad_hoc_connections[member]:
+				for other in by_port[(reference.instance.instance_name, reference.port.name)]:
+					if other not in seen:
+						seen.add(other)
+						group.append(other)
+		groups.append(group)
+	return groups
+
+
 def _ad_hoc_nets(linked):
-	"""The ad hoc connections between instances (step 4): their (net name, width) in design
-	order, and instance name -> {port name -> net name}. A connection with a top port waits for
-	step 5. The ports on a net must have the same width and bit order. Any mix of directions is
-	accepted (the nets are wires); a phantom port is refused."""
+	"""The ad hoc nets between instances (step 4): their (net name, width) in design order, and
+	instance name -> {port name -> net name}. Connections that share a port are one net, named
+	after the first of them in design order (_ad_hoc_groups); a port listed twice is written
+	once. A net that touches a top port waits for step 5. The ports on a net must have the same
+	width and bit order. Any mix of directions is accepted (the nets are wires); a phantom port
+	is refused."""
 	nets = []
 	ports = {}
-	for name, references in linked.ad_hoc_connections.items():
-		if linked.ad_hoc_external_ports.get(name):
+	for group in _ad_hoc_groups(linked):
+		if any(linked.ad_hoc_external_ports.get(member) for member in group):
 			continue
+		name = group[0]
+		references = []
+		for member in group:
+			references.extend(linked.ad_hoc_connections[member])
 		shapes = []
 		for reference in references:
 			if reference.port.wire.direction is ipxact.Direction.PHANTOM:

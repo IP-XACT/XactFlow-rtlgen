@@ -4,6 +4,10 @@ import pytest
 from rtlgen import RtlExporter, _ad_hoc_nets, _instance_lines
 
 
+IRQ = "uart_irq_o_to_cpu_irq_i"
+DEBUG = "debug_debug_req_o_to_cpu_debug_req_i"
+
+
 def _port(linked, instance, port_name):
 	"""A port of an instance's component."""
 	return next(p for p in linked.instances[instance].component.model.ports if p.name == port_name)
@@ -14,6 +18,11 @@ def _set_range(linked, instance, port_name, left, right):
 	_port(linked, instance, port_name).wire.vectors = [
 		ipxact.Vector(left=ipxact.Expression(value=left), right=ipxact.Expression(value=right))
 	]
+
+
+def _reference(linked, connection, port_name):
+	"""The reference to a port in an ad hoc connection."""
+	return next(r for r in linked.ad_hoc_connections[connection] if r.port.name == port_name)
 
 
 def test_ports_in_component_order(linked):
@@ -65,3 +74,27 @@ def test_phantom_port_is_refused(linked):
 	_port(linked, "cpu", "irq_i").wire.direction = ipxact.Direction.PHANTOM
 	with pytest.raises(ValueError, match="phantom"):
 		_ad_hoc_nets(linked)
+
+
+def test_connections_sharing_a_port_are_one_net(linked):
+	linked.ad_hoc_connections[DEBUG].append(_reference(linked, IRQ, "irq_i"))
+	nets, ports = _ad_hoc_nets(linked)
+	assert nets == [(IRQ, 1)]
+	assert ports["cpu"] == {"irq_i": IRQ, "debug_req_i": IRQ}
+	assert ports["debug"] == {"debug_req_o": IRQ}
+
+def test_a_later_connection_joins_two_nets(linked):
+	linked.ad_hoc_connections["bridge"] = [
+		_reference(linked, IRQ, "irq_o"), _reference(linked, DEBUG, "debug_req_o")
+	]
+	assert _ad_hoc_nets(linked)[0] == [(IRQ, 1)]
+
+
+def test_port_twice_in_one_connection_is_written_once(linked):
+	linked.ad_hoc_connections[IRQ].append(_reference(linked, IRQ, "irq_i"))
+	assert _instance_lines(linked).count(".irq_i(") == 1
+
+
+def test_net_sharing_a_port_with_a_top_port_connection_is_left_out(linked):
+	linked.ad_hoc_connections[IRQ].append(_reference(linked, "clk_i_to_cpu_clk_i", "clk_i"))
+	assert ".irq_i(" not in _instance_lines(linked)
