@@ -4,10 +4,14 @@ import pytest
 from rtlgen import RtlExporter, _ad_hoc_nets, _instance_lines
 
 
+def _port(linked, instance, port_name):
+	"""A port of an instance's component."""
+	return next(p for p in linked.instances[instance].component.model.ports if p.name == port_name)
+
+
 def _set_range(linked, instance, port_name, left, right):
 	"""Give a port of an instance's component the range [left:right]."""
-	port = next(p for p in linked.instances[instance].component.model.ports if p.name == port_name)
-	port.wire.vectors = [
+	_port(linked, instance, port_name).wire.vectors = [
 		ipxact.Vector(left=ipxact.Expression(value=left), right=ipxact.Expression(value=right))
 	]
 
@@ -47,4 +51,17 @@ def test_wide_net_is_declared_with_its_range(library, linked, tmp_path):
 	_set_range(linked, "uart", "irq_o", "7", "0")
 	_set_range(linked, "cpu", "irq_i", "7", "0")
 	RtlExporter().export(library, tmp_path)
-	assert "  logic [7:0] uart_irq_o_to_cpu_irq_i;\n" in (tmp_path / "soc_a.sv").read_text()
+	assert "  wire [7:0] uart_irq_o_to_cpu_irq_i;\n" in (tmp_path / "soc_a.sv").read_text()
+
+
+@pytest.mark.parametrize("direction", [ipxact.Direction.OUT, ipxact.Direction.INOUT])
+def test_several_drivers_and_inouts_are_accepted(linked, direction):
+	_port(linked, "cpu", "irq_i").wire.direction = direction
+	nets, _ = _ad_hoc_nets(linked)
+	assert ("uart_irq_o_to_cpu_irq_i", 1) in nets
+
+
+def test_phantom_port_is_refused(linked):
+	_port(linked, "cpu", "irq_i").wire.direction = ipxact.Direction.PHANTOM
+	with pytest.raises(ValueError, match="phantom"):
+		_ad_hoc_nets(linked)

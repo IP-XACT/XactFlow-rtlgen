@@ -51,7 +51,7 @@ class RtlExporter(xactflow.Exporter):
 		instances = _instance_lines(linked)
 		nets, _ = _ad_hoc_nets(linked)
 		net_lines = "".join(
-			f"  logic [{width - 1}:0] {net};\n" if width > 1 else f"  logic {net};\n"
+			f"  wire [{width - 1}:0] {net};\n" if width > 1 else f"  wire {net};\n"
 			for net, width in nets
 		)
 		if net_lines:
@@ -118,7 +118,8 @@ def _instance_lines(linked):
 def _ad_hoc_nets(linked):
 	"""The ad hoc connections between instances (step 4): their (net name, width) in design
 	order, and instance name -> {port name -> net name}. A connection with a top port waits for
-	step 5. The ports on a net must have the same width and bit order."""
+	step 5. The ports on a net must have the same width and bit order. Any mix of directions is
+	accepted (the nets are wires); a phantom port is refused."""
 	nets = []
 	ports = {}
 	for name, references in linked.ad_hoc_connections.items():
@@ -126,6 +127,12 @@ def _ad_hoc_nets(linked):
 			continue
 		shapes = []
 		for reference in references:
+			if reference.port.wire.direction is ipxact.Direction.PHANTOM:
+				raise ValueError(
+					f"ad hoc connection '{name}' connects port '{reference.port.name}' "
+					f"of instance '{reference.instance.instance_name}', which is "
+					"phantom: it is not in the module"
+				)
 			bounds = _port_range(reference.instance, reference.port, _resolver(reference.instance))
 			if bounds is None:
 				width = 1
