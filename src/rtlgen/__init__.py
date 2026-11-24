@@ -144,25 +144,40 @@ def _ad_hoc_nets(linked):
 	instance name -> {port name -> net name}. Connections that share a port are one net, named
 	after the first of them in design order (_ad_hoc_groups); a port listed twice is written
 	once. A net that touches a top port waits for step 5. The ports on a net must have the same
-	width and bit order. Any mix of directions is accepted (the nets are wires); a phantom port
-	is refused."""
+	width and bit order. Any mix of directions is accepted (the nets are wires). What rtlgen
+	can't write yet is refused: a tiedValue here, and ports in _check_reference."""
 	nets = []
 	ports = {}
+	sources = {}
+	for ad_hoc in linked.design.ad_hoc_connections:
+		if ad_hoc.name in sources:
+			raise ValueError(
+				f"design {linked.vlnv} has two ad hoc connections named '{ad_hoc.name}': "
+				"names must be unique"
+			)
+		sources[ad_hoc.name] = ad_hoc
 	for group in _ad_hoc_groups(linked):
 		if any(linked.ad_hoc_external_ports.get(member) for member in group):
 			continue
 		name = group[0]
+		_check_name(name, f"ad hoc connection name '{name}' in design {linked.vlnv}")
+		if name in linked.instances:
+			raise ValueError(
+				f"ad hoc connection '{name}' has the same name as an instance: its net and the "
+				"instance would clash in the module"
+			)
 		references = []
 		for member in group:
+			if sources[member].tied_value is not None:
+				raise ValueError(
+					f"ad hoc connection '{member}' has a tiedValue: "
+					"tie-offs are not supported yet"
+				)
+			for reference in linked.ad_hoc_connections[member]:
+				_check_reference(member, reference)
 			references.extend(linked.ad_hoc_connections[member])
 		shapes = []
 		for reference in references:
-			if reference.port.wire.direction is ipxact.Direction.PHANTOM:
-				raise ValueError(
-					f"ad hoc connection '{name}' connects port '{reference.port.name}' "
-					f"of instance '{reference.instance.instance_name}', which is "
-					"phantom: it is not in the module"
-				)
 			bounds = _port_range(reference.instance, reference.port, _resolver(reference.instance))
 			if bounds is None:
 				width = 1
@@ -170,6 +185,13 @@ def _ad_hoc_nets(linked):
 				left, right = bounds
 				width = abs(left - right) + 1
 			shapes.append((reference, bounds, width))
+		if len(group) == 1:
+			label = f"ad hoc connection '{name}'"
+		else:
+			label = (
+				"ad hoc connections " + ", ".join(f"'{m}'" for m in group)
+				+ " (one net: they share a port)"
+			)
 		listed = ", ".join(
 			f"{reference.instance.instance_name}.{reference.port.name} "
 			+ (f"[{bounds[0]}:{bounds[1]}]" if bounds else "1 bit")
@@ -177,18 +199,56 @@ def _ad_hoc_nets(linked):
 		)
 		if len({width for reference, bounds, width in shapes}) > 1:
 			raise ValueError(
-				f"ad hoc connection '{name}' joins ports of different widths ({listed}): "
+				f"{label} joins ports of different widths ({listed}): "
 				"part selects are not supported yet"
 			)
 		if len({bounds[0] > bounds[1] for reference, bounds, width in shapes if width > 1}) > 1:
 			raise ValueError(
-				f"ad hoc connection '{name}' joins ports with opposite bit orders ({listed}): "
+				f"{label} joins ports with opposite bit orders ({listed}): "
 				"not supported yet"
 			)
 		nets.append((name, width))
 		for reference in references:
 			ports.setdefault(reference.instance.instance_name, {})[reference.port.name] = name
 	return nets, ports
+
+
+def _check_reference(connection, reference):
+	"""Refuse a port reference that rtlgen can't write yet."""
+	_check_name(
+		reference.port.name,
+		f"port name '{reference.port.name}' of instance '{reference.instance.instance_name}'"
+	)
+	if reference.port.wire is None:
+		raise ValueError(
+			f"ad hoc connection '{connection}' connects port '{reference.port.name}' "
+			f"of instance '{reference.instance.instance_name}', which is "
+			"not a wire port: transactional and structured ports are not supported yet"
+		)
+	if reference.port.wire.direction is ipxact.Direction.PHANTOM:
+		raise ValueError(
+			f"ad hoc connection '{connection}' connects port '{reference.port.name}' "
+			f"of instance '{reference.instance.instance_name}', which is "
+			"phantom: it is not in the module"
+		)
+	if reference.port.arrays:
+		raise ValueError(
+			f"ad hoc connection '{connection}' connects port '{reference.port.name}' "
+			f"of instance '{reference.instance.instance_name}', which is "
+			"an array: port arrays are not supported yet"
+		)
+	if reference.source.part_select is not None:
+		raise ValueError(
+			f"ad hoc connection '{connection}' takes a part of port '{reference.port.name}' "
+			f"of instance '{reference.instance.instance_name}' (partSelect): "
+			"part selects are not supported yet"
+		)
+	if reference.source.sub_port_refs:
+		raise ValueError(
+			f"ad hoc connection '{connection}' connects a sub-port of port '{reference.port.name}' "
+			f"of instance '{reference.instance.instance_name}' (subPortReference): "
+			"sub-ports of structured ports are not supported yet"
+		)
 
 
 def _port_range(instance, port, resolve):

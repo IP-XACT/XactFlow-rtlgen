@@ -151,14 +151,15 @@ entry, and the old one is marked superseded rather than edited.
     view, or the view a design configuration chooses (step 8).
 
 ## D5. Every name rtlgen writes is a simple identifier
-*2026-11-19 · active*
+*2026-11-19 · active · step 4 names added 2026-11-24*
 
 - **Decision:** every name the exporter writes into SystemVerilog must be a simple identifier: a
   letter or `_`, then letters, digits, `_` or `$` (IEEE 1800 5.6). Any other name is refused,
   with a message saying which name it is and where it comes from. Keywords are not checked yet.
   This replaces D1 item 5. From step 2 it covers the module name (D1), each instance's module
-  name (D4) and each instance name; from step 3 each module parameter name (D6); later steps
-  add their names here, not a rule of their own.
+  name (D4) and each instance name; from step 3 each module parameter name (D6); from step 4
+  each ad hoc connection name, which names its net (D9), and each port name in an instance's
+  port list (D10). Later steps add their names here, not a rule of their own.
 - **Why:** one rule in one place: a new kind of name needs no new decision, and copies of a rule
   cannot drift apart. The reasons against escaped identifiers, repairing names and checking
   keywords are those of D1 (considered, 5).
@@ -277,3 +278,120 @@ entry, and the old one is marked superseded rather than edited.
 - **Considered:** writing the top's parameters now, as declarations: decides step 8 before
   step 8, and reopens D7.
 - **Revisit if:** hierarchy is supported (step 8).
+
+## D9. One wire per ad hoc connection, named after it
+*2026-11-24 · active*
+
+- **Decision:** each ad hoc connection between instances becomes one net, named after the
+  connection, and each of its ports is connected to it.
+  1. Form: `wire <name>;` for one bit, `wire [W-1:0] <name>;` wider (D12), one per line, in
+     design order, before the instances and followed by a blank line. Each port of the
+     connection is written `.<port>(<name>)` in its instance's port list (D10).
+  2. Connections that share a port (the same port of the same instance, directly or through
+     other connections) are one net, named after the first of them in design order. A port
+     listed twice is written once.
+  3. Every net is a `wire`, so any mix of directions is accepted, several drivers and inouts
+     included.
+  4. Names: the connection name must be a legal identifier (D5). A net with the same name as an
+     instance is refused. Two connections with the same name are refused: IEEE 1685-2022 7.5.2
+     requires the names to be unique.
+- **Why:** the connection's name is what the author wrote, so the RTL reads like the design.
+  Merging: IEEE 1685-2022 does not say what a port in two ad hoc connections means. 7.5.2 asks
+  only for unique names and at least one port reference, 7.6.2 calls a connection's port
+  references "the full set of pins and ports involved in a single ad-hoc connection", and no
+  Semantic Consistency Rule covers it. But archidesc writes one connection per `connect()`
+  call, so a driver wired to several inputs is one port in several connections: the example
+  does this for `clk_i` and `rst_ni`. A SystemVerilog port takes one expression, so the
+  connections can only be one net. `wire`: slang refuses two drivers on a `logic` ("cannot have
+  multiple continuous assignments to variable") and an inout on one ("only nets are allowed");
+  both are legal on a `wire`. Names: a net and an instance share the module's namespace
+  (Verilator: "Instance has the same name as variable"; slang: "redefinition"). `xactflow link`
+  0.4.1 keeps only the last of two connections with one name, with no diagnostic, so rtlgen
+  reads the names from the design as written.
+- **Considered:**
+  1. A net named after its driver, `<instance>_<port>`: an invented name, it needs exactly one
+     driver, and it clashes with the example's top port `uart_tx_o`. A net per port and an
+     `assign` per connection, as the old exporter did: more lines, and net names the design
+     does not have. The cost accepted: bit ranges (step 7) become concatenations in port
+     lists.
+  2. Refusing a port in two connections: chosen first, then replaced the same day, once
+     archidesc's fan-out showed it would refuse ordinary designs.
+  3. Refusing several drivers and inouts on a net: both are legal on a `wire`, so it would
+     refuse designs that SystemVerilog accepts. A `wire` only for nets with several drivers or
+     an inout, `logic` elsewhere: a rule about directions for no gain in the output.
+  4. Renaming a net that clashes with an instance (adding `_net`, as the old exporter did):
+     an invented name, which can clash again.
+- **Revisit if:**
+  - Top-level ports (step 5): connections that share only a top port (the example's `clk_i` is
+    in five) must become one net through it.
+  - Bit ranges (step 7): one port in several connections with different bits is the normal case
+    there, so merging by whole port no longer fits.
+  - The IEEE 1685 working group says what a port in two ad hoc connections means.
+  - `xactflow link` reports duplicate connection names.
+
+## D10. Ports in the component's order
+*2026-11-24 · active*
+
+- **Decision:** an instance with connected ports is written `<module> <instance name> ( ... );`,
+  with one `.<port>(<net>)` per line, four spaces deep, in the order of its component's ports
+  (`model.ports`). Only connected ports are listed. Each port name must be a legal identifier
+  (D5).
+- **Why:** the order then matches the module's own port list, so the two can be read side by
+  side, and it does not change when the design lists its connections in another order.
+- **Considered:** the order of the connections in the design: the port list would follow how
+  the design happens to be written.
+- **Revisit if:** unconnected ports (step 7) are written too.
+
+## D11. Connections to top ports wait for step 5
+*2026-11-24 · active*
+
+- **Decision:** an ad hoc connection with an `externalPortReference` is left out, with no
+  message, until step 5. So is every connection merged with it (D9 item 2). The instance ports
+  it would connect are left out of their port lists.
+- **Why:** top-level ports are step 5. 20 of the example's 22 ad hoc connections reach a top
+  port (`clk_i`, `rst_ni`, the UART, GPIO and JTAG pins), so refusing would refuse it. The
+  generated module has no ports yet, so the missing connections are plain to see, not hidden.
+- **Considered:** refusing such connections: refuses the example until step 5. Writing the
+  instance side as a net of its own: a net that goes nowhere.
+- **Revisit if:** top-level ports are written (step 5).
+
+## D12. Ports on a net have the same width and bit order
+*2026-11-24 · active*
+
+- **Decision:** all ports on a net must have the same width and the same bit order. The net is
+  declared `[W-1:0]`, or with no range for one bit.
+  1. Bounds are worked out for each instance with `xactflow.evaluate()`, with the design's
+     overrides in place: `[BAUDRATE/1200-1:0]` with `BAUDRATE` 9600 is 8 bits.
+  2. Bounds that differ but give the same width (`[15:8]` and `[7:0]`) are accepted:
+     SystemVerilog connects them bit by bit, left to right.
+  3. Different widths are refused: part selects wait for step 7.
+  4. Opposite bit orders (`[7:0]` with `[0:7]`) are refused.
+  5. A port with several vectors, or a bound that cannot be worked out, is refused, naming it.
+- **Why:** SystemVerilog pads or cuts a port connected to a net of another width, with at most
+  a lint warning, so a width mismatch would give wrong RTL with no error from rtlgen. With
+  opposite bit orders, SystemVerilog joins bit 7 of one port to bit 0 of the other; whether
+  that is what IEEE 1685 means was not checked, so it is refused rather than guessed.
+- **Considered:** accepting opposite bit orders, connected left to right as SystemVerilog does:
+  a guess about the standard.
+- **Revisit if:** part selects are supported (step 7), or the standard's bit mapping for
+  opposite orders is checked.
+
+## D13. What rtlgen cannot wire yet is refused
+*2026-11-24 · active*
+
+- **Decision:** an ad hoc connection with any of these is refused, with a message naming the
+  connection and, for 1 to 5, the port and its instance:
+  1. a `phantom` port: it is not in the module, so there is nothing to connect;
+  2. a port that is not a wire port (transactional or structured);
+  3. a port with array dimensions (`<arrays>`);
+  4. a `partSelect`;
+  5. a `subPortReference`;
+  6. a `tiedValue`.
+- **Why:** before these checks, rtlgen ignored 3 to 6 and wrote wrong RTL with no error: a tie
+  lost, a whole port wired where only part of it was meant; 2 crashed. rtlgen refuses what it
+  cannot write correctly instead of writing something wrong. Tie-offs and bit ranges are
+  step 7.
+- **Considered:** leaving a phantom port out of its net with no message: the connection would
+  lose an end silently.
+- **Revisit if:** tie-offs and bit ranges are supported (step 7: 4 and 6), or a real input
+  (step 9) has structured, transactional or array ports, or sub-ports.

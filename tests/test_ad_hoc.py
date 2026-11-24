@@ -83,7 +83,9 @@ def test_connections_sharing_a_port_are_one_net(linked):
 	assert ports["cpu"] == {"irq_i": IRQ, "debug_req_i": IRQ}
 	assert ports["debug"] == {"debug_req_o": IRQ}
 
+
 def test_a_later_connection_joins_two_nets(linked):
+	linked.design.ad_hoc_connections.append(ipxact.AdHocConnection(name="bridge"))
 	linked.ad_hoc_connections["bridge"] = [
 		_reference(linked, IRQ, "irq_o"), _reference(linked, DEBUG, "debug_req_o")
 	]
@@ -98,3 +100,73 @@ def test_port_twice_in_one_connection_is_written_once(linked):
 def test_net_sharing_a_port_with_a_top_port_connection_is_left_out(linked):
 	linked.ad_hoc_connections[IRQ].append(_reference(linked, "clk_i_to_cpu_clk_i", "clk_i"))
 	assert ".irq_i(" not in _instance_lines(linked)
+
+
+def test_non_wire_port_is_refused(linked):
+	_port(linked, "cpu", "irq_i").wire = None
+	with pytest.raises(ValueError, match="not a wire port"):
+		_ad_hoc_nets(linked)
+
+
+def test_port_array_is_refused(linked):
+	_port(linked, "cpu", "irq_i").arrays = [
+		ipxact.ArrayBound(left=ipxact.Expression(value="3"), right=ipxact.Expression(value="0"))
+	]
+	with pytest.raises(ValueError, match="an array"):
+		_ad_hoc_nets(linked)
+
+
+def test_part_select_is_refused(linked):
+	_reference(linked, IRQ, "irq_i").source.part_select = ipxact.PartSelect()
+	with pytest.raises(ValueError, match="partSelect"):
+		_ad_hoc_nets(linked)
+
+
+def test_sub_port_reference_is_refused(linked):
+	_reference(linked, IRQ, "irq_i").source.sub_port_refs = [ipxact.SubPortReference(sub_port_ref="x")]
+	with pytest.raises(ValueError, match="subPortReference"):
+		_ad_hoc_nets(linked)
+
+
+def test_tied_value_is_refused(linked):
+	connection = next(a for a in linked.design.ad_hoc_connections if a.name == IRQ)
+	connection.tied_value = ipxact.Expression(value="0")
+	with pytest.raises(ValueError, match="tiedValue"):
+		_ad_hoc_nets(linked)
+
+
+def _rename(linked, old, new):
+	"""Rename an ad hoc connection, in the linked design and in the design as written."""
+	linked.ad_hoc_connections[new] = linked.ad_hoc_connections.pop(old)
+	next(a for a in linked.design.ad_hoc_connections if a.name == old).name = new
+
+
+def test_connection_name_that_is_not_an_identifier_is_refused(linked):
+	_rename(linked, IRQ, "irq-net")
+	with pytest.raises(ValueError, match="ad hoc connection name 'irq-net'"):
+		_ad_hoc_nets(linked)
+
+
+def test_net_named_like_an_instance_is_refused(linked):
+	_rename(linked, IRQ, "uart")
+	with pytest.raises(ValueError, match="same name as an instance"):
+		_ad_hoc_nets(linked)
+
+
+def test_port_name_that_is_not_an_identifier_is_refused(linked):
+	_port(linked, "cpu", "irq_i").name = "irq-i"
+	with pytest.raises(ValueError, match="port name 'irq-i'"):
+		_ad_hoc_nets(linked)
+
+
+def test_two_connections_with_one_name_are_refused(linked):
+	linked.design.ad_hoc_connections.append(ipxact.AdHocConnection(name=IRQ))
+	with pytest.raises(ValueError, match="two ad hoc connections named"):
+		_ad_hoc_nets(linked)
+
+
+def test_merged_net_names_all_its_connections(linked):
+	linked.ad_hoc_connections[DEBUG].append(_reference(linked, IRQ, "irq_i"))
+	_set_range(linked, "uart", "irq_o", "7", "0")
+	with pytest.raises(ValueError, match=f"^ad hoc connections '{IRQ}', '{DEBUG}' "):
+		_ad_hoc_nets(linked)
