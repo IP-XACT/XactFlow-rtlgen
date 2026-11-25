@@ -151,7 +151,7 @@ entry, and the old one is marked superseded rather than edited.
     view, or the view a design configuration chooses (step 8).
 
 ## D5. Every name rtlgen writes is a simple identifier
-*2026-11-19 · active · step 4 names added 2026-11-24*
+*2026-11-19 · active · step 4 names added 2026-11-24, step 5 names 2026-11-25*
 
 - **Decision:** every name the exporter writes into SystemVerilog must be a simple identifier: a
   letter or `_`, then letters, digits, `_` or `$` (IEEE 1800 5.6). Any other name is refused,
@@ -159,7 +159,8 @@ entry, and the old one is marked superseded rather than edited.
   This replaces D1 item 5. From step 2 it covers the module name (D1), each instance's module
   name (D4) and each instance name; from step 3 each module parameter name (D6); from step 4
   each ad hoc connection name, which names its net (D9), and each port name in an instance's
-  port list (D10). Later steps add their names here, not a rule of their own.
+  port list (D10); from step 5 each top port name in the module header (D14). Later steps add
+  their names here, not a rule of their own.
 - **Why:** one rule in one place: a new kind of name needs no new decision, and copies of a rule
   cannot drift apart. The reasons against escaped identifiers, repairing names and checking
   keywords are those of D1 (considered, 5).
@@ -280,7 +281,7 @@ entry, and the old one is marked superseded rather than edited.
 - **Revisit if:** hierarchy is supported (step 8).
 
 ## D9. One wire per ad hoc connection, named after it
-*2026-11-24 · active*
+*2026-11-24 · active · items 2 and 4 extended to top ports by D15 and D16 (2026-11-25)*
 
 - **Decision:** each ad hoc connection between instances becomes one net, named after the
   connection, and each of its ports is connected to it.
@@ -323,7 +324,7 @@ entry, and the old one is marked superseded rather than edited.
      an invented name, which can clash again.
 - **Revisit if:**
   - Top-level ports (step 5): connections that share only a top port (the example's `clk_i` is
-    in five) must become one net through it.
+    in five) must become one net through it. Done: D15.
   - Bit ranges (step 7): one port in several connections with different bits is the normal case
     there, so merging by whole port no longer fits.
   - The IEEE 1685 working group says what a port in two ad hoc connections means.
@@ -343,7 +344,7 @@ entry, and the old one is marked superseded rather than edited.
 - **Revisit if:** unconnected ports (step 7) are written too.
 
 ## D11. Connections to top ports wait for step 5
-*2026-11-24 · active*
+*2026-11-24 · superseded by D15 (2026-11-25)*
 
 - **Decision:** an ad hoc connection with an `externalPortReference` is left out, with no
   message, until step 5. So is every connection merged with it (D9 item 2). The instance ports
@@ -353,10 +354,10 @@ entry, and the old one is marked superseded rather than edited.
   generated module has no ports yet, so the missing connections are plain to see, not hidden.
 - **Considered:** refusing such connections: refuses the example until step 5. Writing the
   instance side as a net of its own: a net that goes nowhere.
-- **Revisit if:** top-level ports are written (step 5).
+- **Revisit if:** top-level ports are written (step 5). Done: D15.
 
 ## D12. Ports on a net have the same width and bit order
-*2026-11-24 · active*
+*2026-11-24 · active · extended to top ports by D16 (2026-11-25)*
 
 - **Decision:** all ports on a net must have the same width and the same bit order. The net is
   declared `[W-1:0]`, or with no range for one bit.
@@ -377,7 +378,7 @@ entry, and the old one is marked superseded rather than edited.
   opposite orders is checked.
 
 ## D13. What rtlgen cannot wire yet is refused
-*2026-11-24 · active*
+*2026-11-24 · active · extended to top ports by D17 (2026-11-25)*
 
 - **Decision:** an ad hoc connection with any of these is refused, with a message naming the
   connection and, for 1 to 5, the port and its instance:
@@ -395,3 +396,125 @@ entry, and the old one is marked superseded rather than edited.
   lose an end silently.
 - **Revisit if:** tie-offs and bit ranges are supported (step 7: 4 and 6), or a real input
   (step 9) has structured, transactional or array ports, or sub-ports.
+
+## D14. The module's ports are the containing component's
+*2026-11-25 · active*
+
+- **Decision:** the module declares every port of the containing component (D1), connected or
+  not, in the component's order (`model.ports`).
+  1. Form: an ANSI header, one port per line, two spaces deep: `<direction> wire <range> <name>`,
+     such as `input wire [15:0] gpio_i`, with no range for one bit. `in`, `out` and `inout`
+     give `input`, `output` and `inout`.
+  2. Range: the component's own bounds, worked out with its parameters and written as they
+     come: `[16:1]` stays `[16:1]` and `[0:7]` stays `[0:7]`.
+  3. A phantom port is not in the module, so it is left out.
+  4. A component with no ports, or only phantom ones, gives `module <name>;`, as before step 5.
+  5. Each name must be a legal identifier (D5). D16 and D17 hold the checks.
+- **Why:** the component is how the rest of the world sees the module. A parent design (step 8)
+  or a hand-written top wires the component's ports, and the ports that bus interfaces reach
+  (step 6) come through port maps, not `externalPortReference`s. Taking only the ports a
+  connection reaches would drop those without a word, and the port list would change whenever
+  a connection inside changed. `wire` for the reasons of D9: several drivers and `inout` are
+  legal on it, and it does not depend on `` `default_nettype ``. The component's own bounds keep
+  bit 1 of the IP-XACT bit 1 of the RTL. A phantom port is, by IEEE 1685, in the IP-XACT but not
+  in the HDL. In the example: 12 ports, 8 inputs and 4 outputs, all 1 bit or `[15:0]`.
+- **Considered:**
+  1. Only the ports an `externalPortReference` reaches: drops spare pins and bus-interface ports
+     silently, and the module no longer matches its component.
+  2. An ANSI header with no type (`input [15:0] gpio_i`): fails under
+     `` `default_nettype none ``. The non-ANSI style, names in the header and declarations in
+     the body: twice the lines, for nothing in SystemVerilog.
+  3. Every range as `[W-1:0]`, as D12 does for nets: `[16:1]` would become `[15:0]`, and the bit
+     numbers would no longer match the component's. The bounds as expressions
+     (`[DATA_W-1:0]`): needs the top's own parameters, which D8 refuses.
+  4. Refusing a component with a phantom port: refuses a valid component. Writing a net that
+     reaches a phantom top port as an internal wire: a guess at what the standard means.
+  5. Always `module <name> ();`: the `()` adds nothing.
+- **Revisit if:**
+  - Bus interfaces (step 6): their ports are already declared here; D16's "reached" must count
+    them.
+  - The top's own parameters are supported (step 8): bounds may then be written as expressions.
+  - A real input (step 9) uses phantom top ports, for example to pass a bus interface through.
+
+## D15. A connection to a top port is wired to the port
+*2026-11-25 · active · supersedes D11*
+
+- **Decision:** a net that reaches a top port is that port: its instance ports are written
+  `.<port>(<top port>)`, and no `wire` is declared for it, as the module header declares it
+  (D14).
+  1. Connections that share a top port are one net, as connections that share an instance's
+     port are (D9 item 2): `clk_i`'s five connections in the example are one net.
+  2. The net takes the top port's name. Its connections' names are not written, so they are not
+     checked (D5).
+  3. A net that reaches two different top ports (a pass-through) is refused, naming the ports.
+- **Why:** this is how a hand-written top reads. Merging on the top port is needed because
+  archidesc writes one connection per `connect()` call, so the clock reaches five instances
+  through five connections. It also matters for the checks: a top output can be driven through
+  one connection and read through another, and only the whole net shows the driver (D16). With
+  two top ports, the net would need two names: an `assign` needs a direction, so it cannot join
+  two inputs, two outputs or an `inout`, and `alias` (IEEE 1800 10.11) is not taken by Yosys and
+  only partly by Verilator. The example has no pass-through, so the choice waits for one.
+- **Considered:**
+  1. One `wire` per connection, named after it, and an `assign` to the top port: five wires and
+     five `assign`s for one clock, and no way to write an `inout`.
+  2. For two top ports: `assign <output> = <input>;`, or `alias`, as above.
+- **Revisit if:** a real input (step 9) has a pass-through between top ports; bit ranges (step 7)
+  make merging by whole port wrong, as for D9.
+
+## D16. Checks at top ports
+*2026-11-25 · active*
+
+- **Decision:** on top of D14 and D15:
+  1. Names: a top port with the same name as an instance is refused, and so is a net named
+     after its connection (D9) with the same name as a top port. A phantom top port is not in
+     the module, so it clashes with nothing.
+  2. Widths: D12's rule, with the top port counted as one more port on its net. Same width and
+     bit order are needed; `[16:1]` on the top port against `[15:0]` on an instance is accepted.
+  3. Directions, on the whole net (D15 item 1):
+     - an instance output on the net of a top input is refused;
+     - a top output with no instance output or `inout` on its net is refused, and so is a top
+       output that no connection reaches;
+     - a top `inout`, and an instance `inout` on a top input, are accepted.
+  4. A top input or `inout` that no connection reaches is accepted: it is declared and not used.
+- **Why:** names: ports, nets and instances share the module's namespace. For a top port named
+  like an instance, Verilator stops with "Non-interface used as an interface" and slang only
+  warns ("redefinition"), so the file could get through one tool. Widths: SystemVerilog pads or
+  cuts silently, as in D12. Directions: an instance output on a top input drives a net that is
+  driven from outside the module; Verilator stops with `ASSIGNIN` and slang says nothing. An
+  undriven top output floats at `z`, with only an `UNDRIVEN` warning from Verilator `-Wall` and
+  nothing from slang: wrong RTL with no error. Writing it correctly needs a value, from a
+  `tiedValue` or the port's `<drivers>`, which waits for step 7, so it is refused rather than
+  guessed. An unused input needs no value: the module ignores the pin, as the design says, with
+  only `UNUSEDSIGNAL` from Verilator `-Wall`. Spare pins and test inputs are common in real tops.
+- **Considered:**
+  1. Renaming a net that clashes (adding `_net`): rejected in D9 for the same reasons.
+  2. Requiring the top port's bounds to match exactly: refuses `[16:1]` against `[15:0]`, which
+     SystemVerilog connects correctly.
+  3. Any mix of directions, as on internal nets (D9 item 3): a driven input then fails later in
+     Verilator, and an undriven output passes silently. Refusing only the driven input: an
+     undriven output passes silently.
+  4. Refusing an unreached input: refuses designs with spare pins, though nothing wrong is
+     written.
+- **Revisit if:**
+  - Bus interfaces (step 6): ports reached through a hierarchical interconnection count as
+    reached, and their drivers as drivers.
+  - Tie-offs and default drivers (step 7): an undriven output with a `tiedValue` or a
+    `<drivers>` default can be written.
+
+## D17. What rtlgen cannot write at a top port is refused
+*2026-11-25 · active*
+
+- **Decision:** the refusals of D13, for the top-port end:
+  1. When declaring any top port, connected or not (D14): a port that is not a wire port, one
+     with `<arrays>`, or one with several vectors.
+  2. At an `externalPortReference`: a phantom top port (D14 item 3), a non-wire port, a
+     `partSelect` or a `subPortReference`. Each message names the connection and the port.
+  3. A `tiedValue` on any connection of a net that reaches a top port: D13 item 6 now covers
+     these connections, since D11's skip is gone.
+- **Why:** without 2, a `partSelect` or `subPortReference` on the top-port end would be ignored
+  and the whole port wired: wrong RTL with no error. 1 is needed because D14 declares every
+  port, so one rtlgen cannot write would otherwise reach the header.
+- **Considered:** skipping an unsupported top port that nothing connects instead of refusing
+  it: drops a port from the module silently, against D14.
+- **Revisit if:** part selects and tie-offs are supported (step 7), or a real input (step 9) has
+  structured, transactional or array top ports.

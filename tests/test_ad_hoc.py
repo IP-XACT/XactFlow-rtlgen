@@ -1,11 +1,15 @@
+import dataclasses
+
 import ipxact
 import pytest
 
-from rtlgen import RtlExporter, _ad_hoc_nets, _instance_lines
+from rtlgen import RtlExporter, _ad_hoc_groups, _ad_hoc_nets, _instance_lines
 
 
 IRQ = "uart_irq_o_to_cpu_irq_i"
 DEBUG = "debug_debug_req_o_to_cpu_debug_req_i"
+RX = "uart_rx_i_to_uart_rx_i"
+TX = "uart_tx_o_to_uart_tx_o"
 
 
 def _port(linked, instance, port_name):
@@ -31,8 +35,10 @@ def test_ports_in_component_order(linked):
 	assert lines.index(".irq_i(") < lines.index(".debug_req_i(")
 
 
-def test_connection_to_a_top_port_is_left_out(linked):
-	assert ".clk_i(" not in _instance_lines(linked)
+def test_connection_to_a_top_port_is_written_to_the_port(linked):
+	nets, ports = _ad_hoc_nets(linked)
+	assert ports["cpu"]["clk_i"] == "clk_i"
+	assert "clk_i" not in [net for net, width in nets]
 
 
 @pytest.mark.parametrize(
@@ -80,8 +86,9 @@ def test_connections_sharing_a_port_are_one_net(linked):
 	linked.ad_hoc_connections[DEBUG].append(_reference(linked, IRQ, "irq_i"))
 	nets, ports = _ad_hoc_nets(linked)
 	assert nets == [(IRQ, 1)]
-	assert ports["cpu"] == {"irq_i": IRQ, "debug_req_i": IRQ}
-	assert ports["debug"] == {"debug_req_o": IRQ}
+	assert ports["cpu"]["irq_i"] == IRQ
+	assert ports["cpu"]["debug_req_i"] == IRQ
+	assert ports["debug"]["debug_req_o"] == IRQ
 
 
 def test_a_later_connection_joins_two_nets(linked):
@@ -97,9 +104,28 @@ def test_port_twice_in_one_connection_is_written_once(linked):
 	assert _instance_lines(linked).count(".irq_i(") == 1
 
 
-def test_net_sharing_a_port_with_a_top_port_connection_is_left_out(linked):
+def test_net_sharing_a_port_with_a_top_port_connection_joins_its_net(linked):
+	_port(linked, "uart", "irq_o").wire.direction = ipxact.Direction.IN
 	linked.ad_hoc_connections[IRQ].append(_reference(linked, "clk_i_to_cpu_clk_i", "clk_i"))
-	assert ".irq_i(" not in _instance_lines(linked)
+	nets, ports = _ad_hoc_nets(linked)
+	assert ports["uart"]["irq_o"] == "clk_i"
+	assert ports["cpu"]["irq_i"] == "clk_i"
+	assert IRQ not in [net for net, width in nets]
+
+
+def test_connections_to_one_top_port_are_one_net(linked):
+	clk = [
+		"clk_i_to_cpu_clk_i", "clk_i_to_bus_clk_i", "clk_i_to_uart_clk_i",
+		"clk_i_to_gpio_clk_i", "clk_i_to_debug_clk_i",
+	]
+	assert clk in _ad_hoc_groups(linked)
+
+
+def test_net_reaching_two_top_ports_is_refused(linked):
+	external = linked.ad_hoc_external_ports
+	external["clk_i_to_cpu_clk_i"].append(external["rst_ni_to_cpu_rst_ni"][0])
+	with pytest.raises(ValueError, match="joins top ports 'clk_i', 'rst_ni'"):
+		_ad_hoc_nets(linked)
 
 
 def test_non_wire_port_is_refused(linked):
@@ -153,6 +179,20 @@ def test_net_named_like_an_instance_is_refused(linked):
 		_ad_hoc_nets(linked)
 
 
+def test_net_named_like_a_top_port_is_refused(linked):
+	_rename(linked, IRQ, "uart_tx_o")
+	with pytest.raises(ValueError, match="same name as a top port"):
+		_ad_hoc_nets(linked)
+
+
+def test_net_named_like_a_phantom_top_port_is_accepted(linked):
+	linked.component.model.ports.append(
+		ipxact.Port(name="spare", wire=ipxact.WirePort(direction=ipxact.Direction.PHANTOM))
+	)
+	_rename(linked, IRQ, "spare")
+	assert ("spare", 1) in _ad_hoc_nets(linked)[0]
+
+
 def test_port_name_that_is_not_an_identifier_is_refused(linked):
 	_port(linked, "cpu", "irq_i").name = "irq-i"
 	with pytest.raises(ValueError, match="port name 'irq-i'"):
@@ -169,4 +209,87 @@ def test_merged_net_names_all_its_connections(linked):
 	linked.ad_hoc_connections[DEBUG].append(_reference(linked, IRQ, "irq_i"))
 	_set_range(linked, "uart", "irq_o", "7", "0")
 	with pytest.raises(ValueError, match=f"^ad hoc connections '{IRQ}', '{DEBUG}' "):
+		_ad_hoc_nets(linked)
+
+
+RX = "uart_rx_i_to_uart_rx_i"
+TX = "uart_tx_o_to_uart_tx_o"
+
+
+def test_instance_output_on_a_top_input_is_refused(linked):  # decision 8
+	_port(linked, "uart", "rx_i").wire.direction = ipxact.Direction.OUT
+	with pytest.raises(ValueError, match="drives top input 'uart_rx_i' from instance output.* uart.rx_i"):
+		_ad_hoc_nets(linked)
+
+
+def test_top_output_with_no_driver_is_refused(linked):  # decision 8
+	_port(linked, "uart", "tx_o").wire.direction = ipxact.Direction.IN
+	with pytest.raises(ValueError, match="top output 'uart_tx_o', but no output or inout drives it"):
+		_ad_hoc_nets(linked)
+
+
+@pytest.mark.parametrize("instance, port_name", [("uart", "rx_i"), ("uart", "tx_o")])
+def test_inout_on_a_top_port_is_accepted(linked, instance, port_name):  # decision 8
+	_port(linked, instance, port_name).wire.direction = ipxact.Direction.INOUT
+	_ad_hoc_nets(linked)
+
+
+def test_top_output_driven_through_another_connection_is_accepted(linked):  # merge on top ports
+	linked.design.ad_hoc_connections.append(ipxact.AdHocConnection(name="tx_tap"))
+	linked.ad_hoc_connections["tx_tap"] = [
+		dataclasses.replace(_reference(linked, IRQ, "irq_i"), port=_port(linked, "cpu", "pready_i"))
+	]
+	linked.ad_hoc_external_ports["tx_tap"] = list(linked.ad_hoc_external_ports[TX])
+	assert _ad_hoc_nets(linked)[1]["cpu"]["pready_i"] == "uart_tx_o"
+
+
+def _add_top_port(linked, name, direction):
+	"""Add a one-bit wire port to the containing component."""
+	linked.component.model.ports.append(ipxact.Port(name=name, wire=ipxact.WirePort(direction=direction)))
+
+
+def test_top_output_no_connection_reaches_is_refused(linked):  # decision 8
+	_add_top_port(linked, "spare_o", ipxact.Direction.OUT)
+	with pytest.raises(ValueError, match="top output 'spare_o' .* is not reached by any connection"):
+		_ad_hoc_nets(linked)
+
+
+def test_top_input_no_connection_reaches_is_accepted(linked):  # decision 9
+	_add_top_port(linked, "spare_i", ipxact.Direction.IN)
+	_ad_hoc_nets(linked)
+
+
+def _external(linked, connection):
+	"""The first top-port reference of an ad hoc connection."""
+	return linked.ad_hoc_external_ports[connection][0]
+
+
+def test_non_wire_top_port_reference_is_refused(linked):  # decision 11
+	_external(linked, TX).port.wire = None
+	with pytest.raises(ValueError, match="top port 'uart_tx_o', which is not a wire port"):
+		_ad_hoc_nets(linked)
+
+
+def test_phantom_top_port_reference_is_refused(linked):  # decision 10
+	_external(linked, TX).port.wire.direction = ipxact.Direction.PHANTOM
+	with pytest.raises(ValueError, match="top port 'uart_tx_o', which is phantom"):
+		_ad_hoc_nets(linked)
+
+
+def test_part_select_on_a_top_port_is_refused(linked):  # decision 11
+	_external(linked, TX).source.part_select = ipxact.PartSelect()
+	with pytest.raises(ValueError, match="top port 'uart_tx_o' through a partSelect"):
+		_ad_hoc_nets(linked)
+
+
+def test_sub_port_reference_on_a_top_port_is_refused(linked):  # decision 11
+	_external(linked, TX).source.sub_port_refs = [ipxact.SubPortReference(sub_port_ref="x")]
+	with pytest.raises(ValueError, match="top port 'uart_tx_o' through a subPortReference"):
+		_ad_hoc_nets(linked)
+
+
+def test_tied_value_on_a_top_port_connection_is_refused(linked):  # decision 11
+	connection = next(a for a in linked.design.ad_hoc_connections if a.name == TX)
+	connection.tied_value = ipxact.Expression(value="0")
+	with pytest.raises(ValueError, match=f"ad hoc connection '{TX}' has a tiedValue"):
 		_ad_hoc_nets(linked)

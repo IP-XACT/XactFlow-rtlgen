@@ -48,6 +48,7 @@ class RtlExporter(xactflow.Exporter):
 			raise ValueError("the design does not link: " + "; ".join(d.message for d in errors))
 
 		module_name = _module_name(linked)
+		port_lines = _top_port_lines(linked)
 		instances = _instance_lines(linked)
 		nets, _ = _ad_hoc_nets(linked)
 		net_lines = "".join(
@@ -56,10 +57,14 @@ class RtlExporter(xactflow.Exporter):
 		)
 		if net_lines:
 			net_lines += "\n"
+		if port_lines:
+			header = f"module {module_name} (\n" + ",\n".join(port_lines) + "\n);\n"
+		else:
+			header = f"module {module_name};\n"
 
 		output_dir = Path(output_dir)
 		output_dir.mkdir(parents=True, exist_ok=True)
-		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\nmodule {module_name};\n{net_lines}{instances}endmodule\n"
+		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\n{header}{net_lines}{instances}endmodule\n"
 		_write(output_dir / f"{module_name}.sv", text)
 
 
@@ -115,13 +120,25 @@ def _instance_lines(linked):
 	return lines
 
 
+def _ad_hoc_keys(linked, name):
+	"""The ports an ad hoc connection touches, as keys: (instance name, port name) for an
+	instance's port, (None, port name) for a top port."""
+	keys = []
+	for reference in linked.ad_hoc_connections[name]:
+		keys.append((reference.instance.instance_name, reference.port.name))
+	for external in linked.ad_hoc_external_ports.get(name, []):
+		keys.append((None, external.port.name))
+	return keys
+
+
 def _ad_hoc_groups(linked):
-	"""The ad hoc connections grouped into nets, where connections that share a port are one net,
-	and each group lists connection names with the net name first."""
+	"""The ad hoc connections grouped into nets, where connections that share a port, an
+	instance's or a top port (_ad_hoc_keys), directly or through other connections, are one net.
+	Each group lists connection names in design order from its first one."""
 	by_port = {}
-	for name, references in linked.ad_hoc_connections.items():
-		for reference in references:
-			by_port.setdefault((reference.instance.instance_name, reference.port.name), []).append(name)
+	for name in linked.ad_hoc_connections:
+		for key in _ad_hoc_keys(linked, name):
+			by_port.setdefault(key, []).append(name)
 	groups = []
 	seen = set()
 	for name in linked.ad_hoc_connections:
@@ -130,8 +147,8 @@ def _ad_hoc_groups(linked):
 		group = [name]
 		seen.add(name)
 		for member in group:
-			for reference in linked.ad_hoc_connections[member]:
-				for other in by_port[(reference.instance.instance_name, reference.port.name)]:
+			for key in _ad_hoc_keys(linked, member):
+				for other in by_port[key]:
 					if other not in seen:
 						seen.add(other)
 						group.append(other)
@@ -140,12 +157,14 @@ def _ad_hoc_groups(linked):
 
 
 def _ad_hoc_nets(linked):
-	"""The ad hoc nets between instances (step 4): their (net name, width) in design order, and
-	instance name -> {port name -> net name}. Connections that share a port are one net, named
-	after the first of them in design order (_ad_hoc_groups); a port listed twice is written
-	once. A net that touches a top port waits for step 5. The ports on a net must have the same
-	width and bit order. Any mix of directions is accepted (the nets are wires). What rtlgen
-	can't write yet is refused: a tiedValue here, and ports in _check_reference."""
+	"""The ad hoc nets (steps 4 and 5): the (net name, width) of each net to declare as a wire,
+	in design order, and instance name -> {port name -> net name}. Connections that share a
+	port are one net (_ad_hoc_groups); a port listed twice is written once. A net that reaches
+	a top port is that port: it takes the port's name and is not declared, as the module header
+	declares it. A net that reaches two top ports is refused. Any other net is named after its
+	first connection in design order. The instance ports on a net must have the same width and
+	bit order. Any mix of directions is accepted (the nets are wires). What rtlgen can't write
+	yet is refused: a tiedValue here, and ports in _check_reference."""
 	nets = []
 	ports = {}
 	sources = {}
@@ -156,16 +175,41 @@ def _ad_hoc_nets(linked):
 				"names must be unique"
 			)
 		sources[ad_hoc.name] = ad_hoc
+	model = linked.component.model or ipxact.Model()
+	top_resolve = xactflow.parameter_resolver(linked.component.parameters)
+	top_names = {
+		port.name for port in model.ports
+		if port.wire is None or port.wire.direction is not ipxact.Direction.PHANTOM
+	}
+	reached = set()
 	for group in _ad_hoc_groups(linked):
-		if any(linked.ad_hoc_external_ports.get(member) for member in group):
-			continue
-		name = group[0]
-		_check_name(name, f"ad hoc connection name '{name}' in design {linked.vlnv}")
-		if name in linked.instances:
+		top_ports = []
+		for member in group:
+			for external in linked.ad_hoc_external_ports.get(member, []):
+				if external.port.name not in top_ports:
+					top_ports.append(external.port.name)
+		reached.update(top_ports)
+		if len(top_ports) > 1:
 			raise ValueError(
-				f"ad hoc connection '{name}' has the same name as an instance: its net and the "
-				"instance would clash in the module"
+				"the net of ad hoc connection(s) " + ", ".join(f"'{m}'" for m in group)
+				+ " joins top ports " + ", ".join(f"'{p}'" for p in top_ports)
+				+ ": a net between top ports is not supported yet"
 			)
+		if top_ports:
+			name = top_ports[0]
+		else:
+			name = group[0]
+			_check_name(name, f"ad hoc connection name '{name}' in design {linked.vlnv}")
+			if name in top_names:
+				raise ValueError(
+					f"ad hoc connection '{name}' has the same name as a top port: "
+					"its net and the port would clash in the module"
+				)
+			if name in linked.instances:
+				raise ValueError(
+					f"ad hoc connection '{name}' has the same name as an instance: its net and the "
+					"instance would clash in the module"
+				)
 		references = []
 		for member in group:
 			if sources[member].tied_value is not None:
@@ -175,41 +219,89 @@ def _ad_hoc_nets(linked):
 				)
 			for reference in linked.ad_hoc_connections[member]:
 				_check_reference(member, reference)
+			for external in linked.ad_hoc_external_ports.get(member, []):
+				_check_external(member, external)
 			references.extend(linked.ad_hoc_connections[member])
 		shapes = []
 		for reference in references:
-			bounds = _port_range(reference.instance, reference.port, _resolver(reference.instance))
+			bounds = _port_range(
+				reference.port,
+				_resolver(reference.instance),
+				f"instance '{reference.instance.instance_name}'",
+			)
 			if bounds is None:
 				width = 1
 			else:
 				left, right = bounds
 				width = abs(left - right) + 1
-			shapes.append((reference, bounds, width))
+			shapes.append((f"{reference.instance.instance_name}.{reference.port.name}", bounds, width))
+		if top_ports:
+			top_port = next(
+				external.port
+				for member in group
+				for external in linked.ad_hoc_external_ports.get(member, [])
+			)
+			bounds = _port_range(top_port, top_resolve, f"component {linked.component.vlnv}")
+			if bounds is None:
+				width = 1
+			else:
+				left, right = bounds
+				width = abs(left - right) + 1
+			shapes.append((f"top port {top_port.name}", bounds, width))
 		if len(group) == 1:
-			label = f"ad hoc connection '{name}'"
+			label = f"ad hoc connection '{group[0]}'"
 		else:
 			label = (
 				"ad hoc connections " + ", ".join(f"'{m}'" for m in group)
 				+ " (one net: they share a port)"
 			)
 		listed = ", ".join(
-			f"{reference.instance.instance_name}.{reference.port.name} "
-			+ (f"[{bounds[0]}:{bounds[1]}]" if bounds else "1 bit")
-			for reference, bounds, width in shapes
+			f"{where} " + (f"[{bounds[0]}:{bounds[1]}]" if bounds else "1 bit")
+			for where, bounds, width in shapes
 		)
-		if len({width for reference, bounds, width in shapes}) > 1:
+		if len({width for where, bounds, width in shapes}) > 1:
 			raise ValueError(
 				f"{label} joins ports of different widths ({listed}): "
 				"part selects are not supported yet"
 			)
-		if len({bounds[0] > bounds[1] for reference, bounds, width in shapes if width > 1}) > 1:
+		if len({bounds[0] > bounds[1] for where, bounds, width in shapes if width > 1}) > 1:
 			raise ValueError(
 				f"{label} joins ports with opposite bit orders ({listed}): "
 				"not supported yet"
 			)
-		nets.append((name, width))
+		if top_ports:
+			# Decision 8: a top input is driven from outside, so no instance output may drive
+			# it; a top output needs an instance output or inout to drive it. A top inout
+			# takes any mix.
+			drivers = [
+				f"{reference.instance.instance_name}.{reference.port.name}"
+				for reference in references
+				if reference.port.wire.direction is ipxact.Direction.OUT
+			]
+			inouts = [
+				reference for reference in references
+				if reference.port.wire.direction is ipxact.Direction.INOUT
+			]
+			if top_port.wire.direction is ipxact.Direction.IN and drivers:
+				raise ValueError(
+					f"{label} drives top input '{top_port.name}' from instance output(s) "
+					f"{', '.join(drivers)}: the input is driven from outside the module"
+				)
+			if top_port.wire.direction is ipxact.Direction.OUT and not (drivers or inouts):
+				raise ValueError(
+					f"{label} reaches top output '{top_port.name}', but no output or inout "
+					"drives it: tie-offs are not supported yet"
+				)
+		if not top_ports:
+			nets.append((name, width))
 		for reference in references:
 			ports.setdefault(reference.instance.instance_name, {})[reference.port.name] = name
+	for port in model.ports:
+		if port.wire and port.wire.direction is ipxact.Direction.OUT and port.name not in reached:
+			raise ValueError(
+				f"top output '{port.name}' of component {linked.component.vlnv} is not reached "
+				"by any connection, so nothing drives it: tie-offs are not supported yet"
+			)
 	return nets, ports
 
 
@@ -251,15 +343,37 @@ def _check_reference(connection, reference):
 		)
 
 
-def _port_range(instance, port, resolve):
-	"""A port's (left, right) bounds, worked out for this instance, or None for a port with no
-	vector (one bit). A port with several vectors is refused for now."""
+def _check_external(connection, external):
+	"""Refuse a top-port reference that rtlgen can't write yet (decisions 10 and 11)."""
+	where = f"ad hoc connection '{connection}' connects top port '{external.port.name}'"
+	if external.port.wire is None:
+		raise ValueError(
+			f"{where}, which is not a wire port: transactional and structured ports are "
+			"not supported yet"
+		)
+	if external.port.wire.direction is ipxact.Direction.PHANTOM:
+		raise ValueError(f"{where}, which is phantom: it is not in the module")
+	if external.source.part_select is not None:
+		raise ValueError(
+			f"{where} through a partSelect: part selects are not supported yet"
+		)
+	if external.source.sub_port_refs:
+		raise ValueError(
+			f"{where} through a subPortReference: sub-ports of structured ports are not "
+			"supported yet"
+		)
+
+
+def _port_range(port, resolve, owner):
+	"""A port's (left, right) bounds, worked out with resolve, or None for a port with no
+	vector (one bit). A port with several vectors is refused for now, naming the port and
+	its owner (an instance, or the containing component for a top port)."""
 	vectors = port.wire.vectors
 	if not vectors:
 		return None
 	if len(vectors) > 1:
 		raise ValueError(
-			f"port '{port.name}' of instance '{instance.instance_name}' has {len(vectors)} "
+			f"port '{port.name}' of {owner} has {len(vectors)} "
 			"vectors: multi-dimensional ports are not supported yet"
 		)
 	try:
@@ -267,7 +381,7 @@ def _port_range(instance, port, resolve):
 		right = xactflow.evaluate(vectors[0].right, resolve)
 	except xactflow.ExpressionError as error:
 		raise ValueError(
-			f"instance '{instance.instance_name}': the range of port '{port.name}' cannot be "
+			f"{owner}: the range of port '{port.name}' cannot be "
 			f"worked out: {error}"
 		) from error
 	return (left, right)
@@ -389,6 +503,51 @@ def _module_name(linked):
 	module_name = next(iter(names.values()))
 	_check_name(module_name, f"module name '{module_name}' from component {component.vlnv}")
 	return module_name
+
+
+def _top_port_lines(linked):
+	"""The module header's port lines, '  <direction> wire [<left>:<right>] <name>' (no range for
+	one bit): one for each port of the containing component, connected or not, in its order,
+	with its bounds worked out with the component's parameters and kept as they are (D14). A
+	phantom port is not in the module, so it is left out. A port rtlgen can't declare yet is
+	refused: one that is not a wire port, an array, one with several vectors (in _port_range),
+	or one whose name is not a legal identifier or is an instance's (D16, D17)."""
+	component = linked.component
+	model = component.model or ipxact.Model()
+	resolve = xactflow.parameter_resolver(component.parameters)
+	lines = []
+	dir_kws = {
+		ipxact.Direction.IN: "input",
+		ipxact.Direction.OUT: "output",
+		ipxact.Direction.INOUT: "inout",
+	}
+	for port in model.ports:
+		if port.wire is None:
+			raise ValueError(
+				f"top port '{port.name}' of component {component.vlnv} is not a wire port: "
+				"transactional and structured ports are not supported yet"
+			)
+		if port.wire.direction is ipxact.Direction.PHANTOM:
+			continue
+		_check_name(port.name, f"top port name '{port.name}' of component {component.vlnv}")
+		if port.name in linked.instances:
+			raise ValueError(
+				f"top port '{port.name}' of component {component.vlnv} has the same name as "
+				"an instance: the port and the instance would clash in the module"
+			)
+		if port.arrays:
+			raise ValueError(
+				f"top port '{port.name}' of component {component.vlnv} is an array: "
+				"port arrays are not supported yet"
+			)
+		bounds = _port_range(port, resolve, f"component {component.vlnv}")
+		if bounds is None:
+			range_text = ""
+		else:
+			left, right = bounds
+			range_text = f" [{left}:{right}]"
+		lines.append(f"  {dir_kws[port.wire.direction]} wire{range_text} {port.name}")
+	return lines
 
 
 def _instance_instantiation(instance):
