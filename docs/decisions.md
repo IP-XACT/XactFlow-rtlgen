@@ -151,7 +151,7 @@ entry, and the old one is marked superseded rather than edited.
     view, or the view a design configuration chooses (step 8).
 
 ## D5. Every name rtlgen writes is a simple identifier
-*2026-11-19 · active · step 4 names added 2026-11-24, step 5 names 2026-11-25*
+*2026-11-19 · active · names added for step 4 (2026-11-24), 5 (2026-11-25) and 6 (2026-11-26)*
 
 - **Decision:** every name the exporter writes into SystemVerilog must be a simple identifier: a
   letter or `_`, then letters, digits, `_` or `$` (IEEE 1800 5.6). Any other name is refused,
@@ -159,8 +159,9 @@ entry, and the old one is marked superseded rather than edited.
   This replaces D1 item 5. From step 2 it covers the module name (D1), each instance's module
   name (D4) and each instance name; from step 3 each module parameter name (D6); from step 4
   each ad hoc connection name, which names its net (D9), and each port name in an instance's
-  port list (D10); from step 5 each top port name in the module header (D14). Later steps add
-  their names here, not a rule of their own.
+  port list (D10); from step 5 each top port name in the module header (D14); from step 6 each
+  bus net name (D18) and each physical port in a port map (D20). Later steps add their names
+  here, not a rule of their own.
 - **Why:** one rule in one place: a new kind of name needs no new decision, and copies of a rule
   cannot drift apart. The reasons against escaped identifiers, repairing names and checking
   keywords are those of D1 (considered, 5).
@@ -357,7 +358,7 @@ entry, and the old one is marked superseded rather than edited.
 - **Revisit if:** top-level ports are written (step 5). Done: D15.
 
 ## D12. Ports on a net have the same width and bit order
-*2026-11-24 · active · extended to top ports by D16 (2026-11-25)*
+*2026-11-24 · active · extended to top ports by D16 (2026-11-25), to bus nets by D19 (2026-11-26)*
 
 - **Decision:** all ports on a net must have the same width and the same bit order. The net is
   declared `[W-1:0]`, or with no range for one bit.
@@ -378,7 +379,7 @@ entry, and the old one is marked superseded rather than edited.
   opposite orders is checked.
 
 ## D13. What rtlgen cannot wire yet is refused
-*2026-11-24 · active · extended to top ports by D17 (2026-11-25)*
+*2026-11-24 · active · extended to top ports by D17 (2026-11-25), to buses by D20 (2026-11-26)*
 
 - **Decision:** an ad hoc connection with any of these is refused, with a message naming the
   connection and, for 1 to 5, the port and its instance:
@@ -432,7 +433,7 @@ entry, and the old one is marked superseded rather than edited.
   5. Always `module <name> ();`: the `()` adds nothing.
 - **Revisit if:**
   - Bus interfaces (step 6): their ports are already declared here; D16's "reached" must count
-    them.
+    them. Done: no change yet, as D20 item 2 refuses `hierInterface`s until step 8.
   - The top's own parameters are supported (step 8): bounds may then be written as expressions.
   - A real input (step 9) uses phantom top ports, for example to pass a bus interface through.
 
@@ -462,7 +463,7 @@ entry, and the old one is marked superseded rather than edited.
   make merging by whole port wrong, as for D9.
 
 ## D16. Checks at top ports
-*2026-11-25 · active*
+*2026-11-25 · active · item 1 extended to bus nets by D19 (2026-11-26)*
 
 - **Decision:** on top of D14 and D15:
   1. Names: a top port with the same name as an instance is refused, and so is a net named
@@ -497,7 +498,8 @@ entry, and the old one is marked superseded rather than edited.
      written.
 - **Revisit if:**
   - Bus interfaces (step 6): ports reached through a hierarchical interconnection count as
-    reached, and their drivers as drivers.
+    reached, and their drivers as drivers. Done: no change yet, as D20 item 2 refuses
+    `hierInterface`s until step 8.
   - Tie-offs and default drivers (step 7): an undriven output with a `tiedValue` or a
     `<drivers>` default can be written.
 
@@ -518,3 +520,117 @@ entry, and the old one is marked superseded rather than edited.
   it: drops a port from the module silently, against D14.
 - **Revisit if:** part selects and tie-offs are supported (step 7), or a real input (step 9) has
   structured, transactional or array top ports.
+
+## D18. One wire per logical port of a bus interconnection
+*2026-11-26 · active*
+
+- **Decision:** an interconnection between two instances' bus interfaces becomes one net for
+  each logical port that both ends map, and each end's physical port is connected to it.
+  1. Name: `<interconnection>_<logical port>`, both as written in the XML: `cpu_to_bus_PADDR`.
+     D19 item 4 holds the name checks.
+  2. Form: a `wire`, as in D9 item 1, with the width of D12 (D19 item 2). Each physical port is
+     written `.<port>(<net>)` in its instance's port list, in the component's order (D10).
+  3. Place: after the ad hoc wires, grouped by interconnection in design order. Each group
+     starts with a blank line and `// <interconnection>`, and its wires follow the port-map
+     order of the interconnection's first end.
+  4. The port maps come from the bus interface's one `abstractionType` (D20 item 3).
+- **Why:** a hand-written top wires a bus the same way: one signal per logical port, each port
+  connected straight to it, as for ad hoc nets, with no `assign`. The name is unique in the
+  module as long as interconnection names are (D19 item 4), and it leads back to the XML
+  element. The comment does the same for each group: the example adds 50 bus wires
+  (5 interconnections, 10 logical ports each), and a flat block of 50 lines is hard to scan.
+  In the example the module then has 52 wires, every APB port is connected, and Verilator
+  `-Wall` gives no warning on `soc_a.sv`.
+- **Considered:**
+  1. A net for each physical port, joined by an `assign`: two names and an `assign` per logical
+     port, and no way to write an `inout`.
+  2. Names in lower case (`cpu_to_bus_paddr`): reads like usual RTL, but two logical ports that
+     differ only in case would share a name. The initiator's port name (`paddr_o`): two
+     instances of one component have the same port names, so their nets would clash.
+  3. One flat block of wires with no comments: hard to scan. Wires sorted by name: mixes ad hoc
+     and bus wires and loses the design's order.
+- **Revisit if:** broadcast, `hierInterface` or monitor interconnections are supported (D20),
+  or bit ranges (step 7) map parts of logical ports.
+
+## D19. Checks on bus nets
+*2026-11-26 · active · extends D12 and D16 item 1 to bus nets*
+
+- **Decision:** on top of D18:
+  1. Both ends map the same logical ports: a logical port that one end maps and the other does
+     not is refused, naming the interconnection, the logical port and the end that lacks it.
+  2. Widths: D12's rule on the two physical ports, each worked out with its own instance's
+     parameters. The abstraction definition's width is not checked.
+  3. Directions: one `out` and one `in`, or an `inout` on either side. Two inputs (nothing
+     drives the net) and two outputs (two drivers) are refused.
+  4. Names: each net name must be a legal identifier (D5). A net with the same name as a top
+     port that is not phantom, an instance, an ad hoc net or another bus net is refused, and so
+     are two interconnections with the same name.
+  5. A port that is on a bus net and in an ad hoc connection is refused, naming the port, the
+     bus net and the connection. A port of a bus interface that no interconnection uses can
+     still be wired ad hoc.
+- **Why:**
+  1. Leaving the mapped port open can leave an input undriven with no error, and driving it from
+     the abstraction definition's default value is a tie-off (step 7). Before this check,
+     rtlgen read only the first end's port maps, so a logical port that only the second end
+     mapped was dropped without a word.
+  2. SystemVerilog pads or cuts silently, as in D12. With no `logicalRange` or `partSelect`
+     (D20 item 4), two ports of one width carry the logical port bit for bit, so checking them
+     against the abstraction definition adds nothing to the RTL: it would validate the XML,
+     which is not the exporter's job.
+  3. A bus net has exactly two ends, so two inputs always float and two outputs always fight,
+     unlike the ad hoc nets of D9 item 3, where other ports may drive the net. The modes are
+     checked in D20 item 2.
+  4. Ports, nets and instances share the module's namespace (D16). xactflow's `link()` does not
+     report two interconnections with one name; their nets would clash with a message naming
+     the same interconnection twice.
+  5. Each instance port is connected once, `.<port>(<net>)`, so one of the two would have to
+     win, or the nets would have to merge. Before this check, the bus net won silently.
+- **Considered:**
+  1. Leaving the port open; driving it from the abstraction definition's default value.
+  2. Checking each port against the abstraction definition's width: needs the abstraction
+     definition loaded and its width worked out for each mode. Sizing the net to the narrower
+     port: SystemVerilog pads or cuts (D12).
+  3. Any mix of directions, as on ad hoc nets: an undriven or doubly driven net passes
+     silently. Checking each direction against the abstraction definition's direction for its
+     mode: needs the abstraction definition, and on a two-end net it rarely catches more.
+  5. Merging the bus net and the ad hoc net: a bus net could then have more than two ports and
+     reach a top port, which needs new rules for its name (D18) and its directions (item 3).
+     Letting one of them win silently: drops a connection the design asks for.
+- **Revisit if:** tie-offs and default values are supported (step 7: item 1), part selects
+  (step 7: item 2), or a real input (step 9) wires a bus port ad hoc as well (item 5).
+
+## D20. What rtlgen cannot wire on a bus yet is refused
+*2026-11-26 · active · extends D13 to bus interconnections*
+
+- **Decision:** refused, with a message saying where it sits:
+  1. In the design: a `monitorInterconnection`.
+  2. In an interconnection: a `hierInterface` (a bus interface of the top); more than two
+     active interfaces, even when the bus definition allows broadcast; any pair of modes other
+     than an initiator with a target (mirrored, system and monitor modes, two initiators).
+  3. At each end: a bus interface with no `abstractionType` or with several; `excludePorts`.
+  4. In each port map: `isInformative`, `logicalTieOff`, `invert`, `logicalRange`, `partSelect`,
+     a `subPortReference`; a logical port mapped twice, or a physical port mapped twice; a
+     physical port the component does not have (SCR 2.19, which xactflow does not check); a
+     physical port whose name is not an identifier (D5), that is not a wire port, that is
+     phantom, or that has `<arrays>`, as D13 refuses for ad hoc connections.
+- **Why:** each needs a rule the example does not exercise, and ignoring it would write wrong RTL
+  with no error. Ignoring `excludePorts` or `isInformative` wires ports the design leaves out;
+  ignoring `invert` drops the inversion; ignoring `logicalTieOff` loses the tie; a port mapped
+  twice keeps only its last map. Several `abstractionType`s are one per view, and picking one
+  needs views (step 8). A `hierInterface` is hierarchy (step 8): until then D14 and D16 stay as
+  they are, so a top output that only a top bus interface would reach is refused as unreached.
+  Broadcast: SCR 2.17 allows more than two ends only on a broadcast bus, and what the targets
+  drive back would have several drivers, which D19 item 3 refuses. Modes: IEEE 1685 also allows
+  an initiator with a mirrored initiator, a target with a mirrored target and a system with a
+  mirrored system (SCR 2.4 to 2.9); the example has only initiators with targets.
+- **Considered:**
+  1. Handling `isInformative` and `excludePorts` now by leaving those logical ports out: the
+     physical ports they leave open hit D19 item 1 or wait for step 7 anyway.
+  2. Broadcast nets, one net per logical port joining every end: needs a direction rule for
+     what the targets drive back.
+  3. `hierInterface`s now, each instance port wired straight to the top port as in D15: needs
+     the top's port maps and the rules for hierarchical modes, with no example to test them.
+- **Revisit if:** tie-offs and bit ranges are supported (step 7: `logicalTieOff`,
+  `logicalRange`, `partSelect`, `isInformative`, `excludePorts`), hierarchy and views (step 8:
+  `hierInterface`, several `abstractionType`s), or a real input (step 9) uses mirrored or system
+  modes, broadcast, `invert` or monitor interconnections.

@@ -315,6 +315,11 @@ def _ad_hoc_nets(linked):
 
 
 def _bus_nets(linked):
+	"""The bus nets (step 6): for each interconnection in design order, (its name, [(net name,
+	width), ...]), and instance name -> {port name -> net name}. Each logical port that both
+	ends map is one net, named <interconnection>_<logical port>, in the first end's port-map
+	order (D18). The checks are D19's; what rtlgen can't wire yet is refused here and in
+	_check_interconnection and _check_port_maps (D20)."""
 	groups = []
 	ports = {}
 	ad_hoc, _ = _ad_hoc_nets(linked)
@@ -387,7 +392,7 @@ def _bus_nets(linked):
 
 def _bus_net_width(net, sides):
 	"""The width of a bus net, from its two sides as (end, port name): both ports need the same
-	width and bit order (D12, decision 4)."""
+	width and bit order (D12, D19 item 2)."""
 	shapes = []
 	for end, name in sides:
 		instance = end.instance.instance_name
@@ -412,7 +417,7 @@ def _bus_net_width(net, sides):
 
 
 def _check_bus_directions(net, sides):
-	"""Refuse a bus net that nothing drives or that two outputs drive (decision 5). An inout on
+	"""Refuse a bus net that nothing drives or that two outputs drive (D19 item 3). An inout on
 	either side is accepted."""
 	directions = []
 	for end, name in sides:
@@ -427,7 +432,7 @@ def _check_bus_directions(net, sides):
 
 
 def _check_interconnection(interconnection):
-	"""Refuse an interconnection that rtlgen can't wire yet."""
+	"""Refuse an interconnection that rtlgen can't wire yet (D20 items 2 and 3)."""
 	name = interconnection.name
 	if interconnection.hier_interfaces:
 		raise ValueError(
@@ -470,7 +475,7 @@ def _check_interconnection(interconnection):
 
 
 def _check_port_maps(where, end):
-	"""Refuse a port map of one end of an interconnection that rtlgen can't wire yet."""
+	"""Refuse a port map of an interconnection's end that rtlgen can't wire yet (D20 item 4)."""
 	ports = {port.name: port for port in end.instance.component.model.ports}
 	logicals = set()
 	physicals = {}
