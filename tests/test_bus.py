@@ -193,3 +193,151 @@ def test_array_physical_port_is_refused(linked):
 	]
 	with pytest.raises(ValueError, match="port 'paddr_i', which is an array"):
 		_bus_nets(linked)
+
+
+@pytest.mark.parametrize("end, instance", [(0, "bus"), (1, "uart")])
+def test_logical_port_mapped_by_one_end_only_is_refused(linked, end, instance):  # decision 3
+	port_maps = _port_maps(linked, "bus_to_uart", end)
+	port_maps[:] = [m for m in port_maps if m.logical_port != "PSLVERR"]
+	message = f"of instance '{instance}' does not map logical port\\(s\\) PSLVERR, which the other"
+	with pytest.raises(ValueError, match=message):
+		_bus_nets(linked)
+
+
+def _vector(left, right):
+	return ipxact.Vector(left=ipxact.Expression(value=left), right=ipxact.Expression(value=right))
+
+
+@pytest.mark.parametrize(
+	"left, right, message",
+	[("15", "0", "of different widths"), ("0", "31", "with opposite bit orders")],
+)
+def test_bus_net_whose_ports_do_not_match_is_refused(linked, left, right, message):  # decision 4
+	_uart_port(linked, "paddr_i").wire.vectors = [_vector(left, right)]
+	listed = f"bus.m0_paddr_o \\[31:0\\], uart.paddr_i \\[{left}:{right}\\]"
+	with pytest.raises(ValueError, match=f"'bus_to_uart_PADDR' joins ports {message} \\({listed}"):
+		_bus_nets(linked)
+
+
+def test_bus_net_with_shifted_bounds_is_accepted(linked):  # D12 item 2
+	_uart_port(linked, "paddr_i").wire.vectors = [_vector("32", "1")]
+	groups, _ = _bus_nets(linked)
+	assert dict(groups[2][1])["bus_to_uart_PADDR"] == 32
+
+
+def test_bus_net_width_uses_each_instances_parameters(linked):  # D12 item 1
+	_uart_port(linked, "paddr_i").wire.vectors = [_vector("BAUDRATE/300-1", "0")]  # 9600/300 = 32
+	groups, _ = _bus_nets(linked)
+	assert dict(groups[2][1])["bus_to_uart_PADDR"] == 32
+
+
+def _side_port(linked, end, name):
+	"""A port of the bus (end 0) or uart (end 1) side of bus_to_uart."""
+	ports = _interconnection(linked, "bus_to_uart").endpoints[end].instance.component.model.ports
+	return next(p for p in ports if p.name == name)
+
+
+def test_bus_net_with_two_outputs_is_refused(linked):  # decision 5
+	_side_port(linked, 1, "paddr_i").wire.direction = ipxact.Direction.OUT
+	listed = "bus.m0_paddr_o \\(out\\), uart.paddr_i \\(out\\)"
+	with pytest.raises(ValueError, match=f"'bus_to_uart_PADDR' joins two outputs \\({listed}\\)"):
+		_bus_nets(linked)
+
+
+def test_bus_net_with_two_inputs_is_refused(linked):  # decision 5
+	_side_port(linked, 0, "m0_paddr_o").wire.direction = ipxact.Direction.IN
+	listed = "bus.m0_paddr_o \\(in\\), uart.paddr_i \\(in\\)"
+	with pytest.raises(ValueError, match=f"'bus_to_uart_PADDR' joins two inputs \\({listed}\\)"):
+		_bus_nets(linked)
+
+
+@pytest.mark.parametrize("end, name", [(0, "m0_paddr_o"), (1, "paddr_i")])
+def test_bus_net_with_an_inout_is_accepted(linked, end, name):  # decision 5
+	_side_port(linked, end, name).wire.direction = ipxact.Direction.INOUT
+	groups, _ = _bus_nets(linked)
+	assert "bus_to_uart_PADDR" in dict(groups[2][1])
+
+
+def _rename_instance(linked, old, new):
+	"""Rename an instance, in the linked design's index and on the instance itself."""
+	instance = linked.instances.pop(old)
+	instance.instance_name = new
+	linked.instances[new] = instance
+
+
+def _rename_ad_hoc(linked, old, new):
+	"""Rename an ad hoc connection, in the linked design and in the design as written."""
+	linked.ad_hoc_connections[new] = linked.ad_hoc_connections.pop(old)
+	next(a for a in linked.design.ad_hoc_connections if a.name == old).name = new
+
+
+def test_bus_net_name_that_is_not_an_identifier_is_refused(linked):  # decision 2, D5
+	_interconnection(linked, "cpu_to_bus").name = "cpu-to-bus"
+	with pytest.raises(ValueError, match="bus net 'cpu-to-bus_PADDR' .* is not a legal"):
+		_bus_nets(linked)
+
+
+def test_bus_net_named_like_a_top_port_is_refused(linked):  # decision 2
+	linked.component.model.ports.append(
+		ipxact.Port(name="cpu_to_bus_PADDR", wire=ipxact.WirePort(direction=ipxact.Direction.IN))
+	)
+	with pytest.raises(ValueError, match="same name as top port 'cpu_to_bus_PADDR'"):
+		_bus_nets(linked)
+
+
+def test_bus_net_named_like_a_phantom_top_port_is_accepted(linked):  # decision 2
+	phantom = ipxact.WirePort(direction=ipxact.Direction.PHANTOM)
+	linked.component.model.ports.append(ipxact.Port(name="cpu_to_bus_PADDR", wire=phantom))
+	_bus_nets(linked)
+
+
+def test_bus_net_named_like_an_instance_is_refused(linked):  # decision 2
+	_rename_instance(linked, "gpio", "cpu_to_bus_PADDR")
+	with pytest.raises(ValueError, match="same name as instance 'cpu_to_bus_PADDR'"):
+		_bus_nets(linked)
+
+
+def test_bus_net_named_like_an_ad_hoc_net_is_refused(linked):  # decision 2
+	_rename_ad_hoc(linked, "uart_irq_o_to_cpu_irq_i", "cpu_to_bus_PADDR")
+	with pytest.raises(ValueError, match="same name as ad hoc net 'cpu_to_bus_PADDR'"):
+		_bus_nets(linked)
+
+
+def test_two_interconnections_with_one_name_are_refused(linked):  # xactflow does not check it
+	_interconnection(linked, "debug_to_bus").name = "cpu_to_bus"
+	with pytest.raises(ValueError, match="two interconnections named 'cpu_to_bus'"):
+		_bus_nets(linked)
+
+
+def test_two_bus_nets_with_one_name_are_refused(linked):  # decision 2
+	_interconnection(linked, "debug_to_bus").name = "cpu_to"
+	for end in (0, 1):
+		port_map = next(m for m in _port_maps(linked, "cpu_to", end) if m.logical_port == "PADDR")
+		port_map.logical_port = "bus_PADDR"  # cpu_to + bus_PADDR = cpu_to_bus + PADDR
+	message = "'cpu_to_bus_PADDR' of interconnection 'cpu_to' has the same name as bus net"
+	with pytest.raises(ValueError, match=message):
+		_bus_nets(linked)
+
+
+def _add_to_irq_connection(linked, port):
+	"""Add a port of uart to the ad hoc connection from uart.irq_o to cpu.irq_i."""
+	references = linked.ad_hoc_connections["uart_irq_o_to_cpu_irq_i"]
+	uart = next(r for r in references if r.instance.instance_name == "uart")
+	references.append(dataclasses.replace(uart, port=_uart_port(linked, port)))
+
+
+def test_port_on_a_bus_net_and_in_an_ad_hoc_connection_is_refused(linked):  # decision 6
+	_add_to_irq_connection(linked, "psel_i")
+	message = (
+		"port 'psel_i' of instance 'uart' is on bus net 'bus_to_uart_PSEL' .* and in ad hoc "
+		"connection 'uart_irq_o_to_cpu_irq_i'"
+	)
+	with pytest.raises(ValueError, match=message):
+		_bus_nets(linked)
+
+
+def test_port_of_an_unconnected_bus_interface_may_be_wired_ad_hoc(linked):  # decision 6
+	_add_to_irq_connection(linked, "psel_i")
+	linked.interconnections.remove(_interconnection(linked, "bus_to_uart"))
+	_, ports = _bus_nets(linked)
+	assert "uart" not in ports

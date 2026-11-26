@@ -317,37 +317,113 @@ def _ad_hoc_nets(linked):
 def _bus_nets(linked):
 	groups = []
 	ports = {}
+	ad_hoc, _ = _ad_hoc_nets(linked)
+	model = linked.component.model or ipxact.Model()
+	taken = {
+		port.name: f"top port '{port.name}'" for port in model.ports
+		if port.wire is None or port.wire.direction is not ipxact.Direction.PHANTOM
+	}
+	taken.update({name: f"instance '{name}'" for name in linked.instances})
+	taken.update({name: f"ad hoc net '{name}'" for name, width in ad_hoc})
+	ad_hoc_ports = {}
+	for connection in linked.ad_hoc_connections:
+		for key in _ad_hoc_keys(linked, connection):
+			ad_hoc_ports.setdefault(key, connection)
 	for monitor in linked.monitor_interconnections:
 		raise ValueError(
 			f"monitor interconnection '{monitor.name}' in design {linked.vlnv}: "
 			"monitor interconnections are not supported yet"
 		)
+	names = set()
 	for interconnection in linked.interconnections:
+		if interconnection.name in names:
+			raise ValueError(
+				f"design {linked.vlnv} has two interconnections named '{interconnection.name}': "
+				"names must be unique"
+			)
+		names.add(interconnection.name)
 		_check_interconnection(interconnection)
 		first, second = interconnection.endpoints
 		first_maps = {port_map.logical_port: port_map.physical_port
 			for port_map in first.bus_interface.abstraction_types[0].port_maps}
 		second_maps = {port_map.logical_port: port_map.physical_port
 			for port_map in second.bus_interface.abstraction_types[0].port_maps}
+		ends = ((second, second_maps, first_maps), (first, first_maps, second_maps))
+		for end, maps, other in ends:
+			missing = [logical for logical in other if logical not in maps]
+			if missing:
+				raise ValueError(
+					f"interconnection '{interconnection.name}': bus interface "
+					f"'{end.bus_interface.name}' of instance '{end.instance.instance_name}' "
+					f"does not map logical port(s) {', '.join(missing)}, which the other end "
+					"maps: unconnected bus ports are not supported yet"
+				)
 		nets = []
 		for logical, physical in first_maps.items():
-			if logical not in second_maps:
-				continue
 			net = f"{interconnection.name}_{logical}"
-			port = next(p for p in first.instance.component.model.ports if p.name == physical)
-			bounds = _port_range(
-				port, _resolver(first.instance), f"instance '{first.instance.instance_name}'"
-			)
-			if bounds is None:
-				width = 1
-			else:
-				left, right = bounds
-				width = abs(left - right) + 1
+			what = f"bus net '{net}' of interconnection '{interconnection.name}'"
+			_check_name(net, what)
+			if net in taken:
+				raise ValueError(
+					f"{what} has the same name as {taken[net]}: they would clash in the module"
+				)
+			taken[net] = what
+			sides = [(first, physical), (second, second_maps[logical])]
+			width = _bus_net_width(net, sides)
+			_check_bus_directions(net, sides)
 			nets.append((net, width))
-			ports.setdefault(first.instance.instance_name, {})[physical] = net
-			ports.setdefault(second.instance.instance_name, {})[second_maps[logical]] = net
+			for end, name in sides:
+				instance = end.instance.instance_name
+				if (instance, name) in ad_hoc_ports:
+					raise ValueError(
+						f"port '{name}' of instance '{instance}' is on {what} and in ad hoc "
+						f"connection '{ad_hoc_ports[(instance, name)]}': a port on both is not "
+						"supported yet"
+					)
+				ports.setdefault(instance, {})[name] = net
 		groups.append((interconnection.name, nets))
 	return groups, ports
+
+
+def _bus_net_width(net, sides):
+	"""The width of a bus net, from its two sides as (end, port name): both ports need the same
+	width and bit order (D12, decision 4)."""
+	shapes = []
+	for end, name in sides:
+		instance = end.instance.instance_name
+		port = next(p for p in end.instance.component.model.ports if p.name == name)
+		bounds = _port_range(port, _resolver(end.instance), f"instance '{instance}'")
+		width = 1 if bounds is None else abs(bounds[0] - bounds[1]) + 1
+		shapes.append((f"{instance}.{name}", bounds, width))
+	listed = ", ".join(
+		f"{where} " + (f"[{bounds[0]}:{bounds[1]}]" if bounds else "1 bit")
+		for where, bounds, width in shapes
+	)
+	if len({width for where, bounds, width in shapes}) > 1:
+		raise ValueError(
+			f"bus net '{net}' joins ports of different widths ({listed}): "
+			"part selects are not supported yet"
+		)
+	if len({bounds[0] > bounds[1] for where, bounds, width in shapes if width > 1}) > 1:
+		raise ValueError(
+			f"bus net '{net}' joins ports with opposite bit orders ({listed}): not supported yet"
+		)
+	return shapes[0][2]
+
+
+def _check_bus_directions(net, sides):
+	"""Refuse a bus net that nothing drives or that two outputs drive (decision 5). An inout on
+	either side is accepted."""
+	directions = []
+	for end, name in sides:
+		port = next(p for p in end.instance.component.model.ports if p.name == name)
+		directions.append((f"{end.instance.instance_name}.{name}", port.wire.direction))
+	listed = ", ".join(f"{where} ({direction.value})" for where, direction in directions)
+	kinds = {direction for where, direction in directions}
+	if kinds == {ipxact.Direction.IN}:
+		raise ValueError(f"bus net '{net}' joins two inputs ({listed}): nothing drives it")
+	if kinds == {ipxact.Direction.OUT}:
+		raise ValueError(f"bus net '{net}' joins two outputs ({listed}): both drive it")
 
 
 def _check_interconnection(interconnection):
