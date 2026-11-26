@@ -317,7 +317,13 @@ def _ad_hoc_nets(linked):
 def _bus_nets(linked):
 	groups = []
 	ports = {}
+	for monitor in linked.monitor_interconnections:
+		raise ValueError(
+			f"monitor interconnection '{monitor.name}' in design {linked.vlnv}: "
+			"monitor interconnections are not supported yet"
+		)
 	for interconnection in linked.interconnections:
+		_check_interconnection(interconnection)
 		first, second = interconnection.endpoints
 		first_maps = {port_map.logical_port: port_map.physical_port
 			for port_map in first.bus_interface.abstraction_types[0].port_maps}
@@ -342,6 +348,110 @@ def _bus_nets(linked):
 			ports.setdefault(second.instance.instance_name, {})[second_maps[logical]] = net
 		groups.append((interconnection.name, nets))
 	return groups, ports
+
+
+def _check_interconnection(interconnection):
+	"""Refuse an interconnection that rtlgen can't wire yet."""
+	name = interconnection.name
+	if interconnection.hier_interfaces:
+		raise ValueError(
+			f"interconnection '{name}' reaches bus interface "
+			f"'{interconnection.hier_interfaces[0].source.bus_ref}' of the top (a hierInterface): "
+			"top-level bus interfaces are not supported yet"
+		)
+	if len(interconnection.endpoints) != 2:
+		raise ValueError(
+			f"interconnection '{name}' has {len(interconnection.endpoints)} "
+			"active interfaces: only two are supported (no broadcast)"
+		)
+	modes = {end.bus_interface.mode for end in interconnection.endpoints}
+	if modes != {ipxact.InterfaceMode.INITIATOR, ipxact.InterfaceMode.TARGET}:
+		listed = " and ".join(
+			f"{end.instance.instance_name}.{end.bus_interface.name} "
+			f"({end.bus_interface.mode.value})"
+			for end in interconnection.endpoints
+		)
+		raise ValueError(
+			f"interconnection '{name}' joins {listed}: only an initiator with a target is "
+			"supported yet"
+		)
+	for end in interconnection.endpoints:
+		where = (
+			f"bus interface '{end.bus_interface.name}' of instance "
+			f"'{end.instance.instance_name}' in interconnection '{name}'"
+		)
+		count = len(end.bus_interface.abstraction_types)
+		if count != 1:
+			raise ValueError(
+				f"{where} has {count} abstractionTypes: only one is supported yet"
+			)
+		if end.source.exclude_ports:
+			excluded = ", ".join(port.value for port in end.source.exclude_ports)
+			raise ValueError(
+				f"{where} excludes logical ports {excluded}: excludePorts is not supported yet"
+			)
+		_check_port_maps(where, end)
+
+
+def _check_port_maps(where, end):
+	"""Refuse a port map of one end of an interconnection that rtlgen can't wire yet."""
+	ports = {port.name: port for port in end.instance.component.model.ports}
+	logicals = set()
+	physicals = {}
+	for port_map in end.bus_interface.abstraction_types[0].port_maps:
+		logical = port_map.logical_port
+		physical = port_map.physical_port
+		maps = f"{where} maps logical port '{logical}'"
+		if logical in logicals:
+			raise ValueError(f"{maps} twice: not supported yet")
+		logicals.add(logical)
+		if port_map.is_informative:
+			raise ValueError(f"{maps} for information only (isInformative): not supported yet")
+		if port_map.logical_tie_off is not None:
+			raise ValueError(
+				f"{maps} to a constant (logicalTieOff): tie-offs are not supported yet"
+			)
+		if port_map.invert:
+			raise ValueError(f"{maps} inverted (invert): not supported yet")
+		if port_map.logical_range is not None:
+			raise ValueError(
+				f"{maps} in part (logicalRange): part selects are not supported yet"
+			)
+		if port_map.part_select is not None:
+			raise ValueError(
+				f"{maps} to part of port '{physical}' (partSelect): "
+				"part selects are not supported yet"
+			)
+		if port_map.sub_port_refs:
+			raise ValueError(
+				f"{maps} to a sub-port of port '{physical}' (subPortReference): "
+				"sub-ports of structured ports are not supported yet"
+			)
+		if physical in physicals:
+			raise ValueError(
+				f"{where} maps port '{physical}' twice (logical ports "
+				f"'{physicals[physical]}' and '{logical}'): not supported yet"
+			)
+		physicals[physical] = logical
+		port = ports.get(physical)
+		if port is None:
+			raise ValueError(f"{maps} to port '{physical}', which the component does not have")
+		_check_name(
+			physical, f"port name '{physical}' of instance '{end.instance.instance_name}'"
+		)
+		if port.wire is None:
+			raise ValueError(
+				f"{maps} to port '{physical}', which is not a wire port: "
+				"transactional and structured ports are not supported yet"
+			)
+		if port.wire.direction is ipxact.Direction.PHANTOM:
+			raise ValueError(
+				f"{maps} to port '{physical}', which is phantom: it is not in the module"
+			)
+		if port.arrays:
+			raise ValueError(
+				f"{maps} to port '{physical}', which is an array: port arrays are not supported yet"
+			)
 
 
 def _check_reference(connection, reference):
