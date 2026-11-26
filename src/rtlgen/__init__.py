@@ -51,10 +51,10 @@ class RtlExporter(xactflow.Exporter):
 		port_lines = _top_port_lines(linked)
 		instances = _instance_lines(linked)
 		nets, _ = _ad_hoc_nets(linked)
-		net_lines = "".join(
-			f"  wire [{width - 1}:0] {net};\n" if width > 1 else f"  wire {net};\n"
-			for net, width in nets
-		)
+		groups, _ = _bus_nets(linked)
+		net_lines = "".join(_wire_line(net, width) for net, width in nets)
+		for name, bus in groups:
+			net_lines += f"\n  // {name}\n" + "".join(_wire_line(net, width) for net, width in bus)
 		if net_lines:
 			net_lines += "\n"
 		if port_lines:
@@ -66,6 +66,11 @@ class RtlExporter(xactflow.Exporter):
 		output_dir.mkdir(parents=True, exist_ok=True)
 		text = f"{_MARKER} from {linked.vlnv}. Do not edit.\n{header}{net_lines}{instances}endmodule\n"
 		_write(output_dir / f"{module_name}.sv", text)
+
+
+def _wire_line(net, width):
+	"""'  wire [W-1:0] <net>;', or with no range for one bit (D12)."""
+	return f"  wire [{width - 1}:0] {net};\n" if width > 1 else f"  wire {net};\n"
 
 
 def _write(path, text):
@@ -95,6 +100,7 @@ def _instance_lines(linked):
 	one per line in '#( ... )' and its connected ports one per line in '( ... )', in the
 	component's port order, when it has any (steps 2 to 4)."""
 	_, ports = _ad_hoc_nets(linked)
+	_, bus_ports = _bus_nets(linked)
 	lines = ""
 	for instance in linked.instances.values():
 		_check_name(
@@ -103,7 +109,10 @@ def _instance_lines(linked):
 		)
 		instantiation = _instance_instantiation(instance)
 		parameters = _module_parameter_lines(instance, instantiation)
-		connected = ports.get(instance.instance_name, {})
+		connected = {
+			**ports.get(instance.instance_name, {}),
+			**bus_ports.get(instance.instance_name, {}),
+		}
 		port_lines = [
 			f"    .{port.name}({connected[port.name]})"
 			for port in instance.component.model.ports
@@ -303,6 +312,36 @@ def _ad_hoc_nets(linked):
 				"by any connection, so nothing drives it: tie-offs are not supported yet"
 			)
 	return nets, ports
+
+
+def _bus_nets(linked):
+	groups = []
+	ports = {}
+	for interconnection in linked.interconnections:
+		first, second = interconnection.endpoints
+		first_maps = {port_map.logical_port: port_map.physical_port
+			for port_map in first.bus_interface.abstraction_types[0].port_maps}
+		second_maps = {port_map.logical_port: port_map.physical_port
+			for port_map in second.bus_interface.abstraction_types[0].port_maps}
+		nets = []
+		for logical, physical in first_maps.items():
+			if logical not in second_maps:
+				continue
+			net = f"{interconnection.name}_{logical}"
+			port = next(p for p in first.instance.component.model.ports if p.name == physical)
+			bounds = _port_range(
+				port, _resolver(first.instance), f"instance '{first.instance.instance_name}'"
+			)
+			if bounds is None:
+				width = 1
+			else:
+				left, right = bounds
+				width = abs(left - right) + 1
+			nets.append((net, width))
+			ports.setdefault(first.instance.instance_name, {})[physical] = net
+			ports.setdefault(second.instance.instance_name, {})[second_maps[logical]] = net
+		groups.append((interconnection.name, nets))
+	return groups, ports
 
 
 def _check_reference(connection, reference):

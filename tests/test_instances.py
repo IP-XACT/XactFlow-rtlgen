@@ -45,7 +45,7 @@ def test_the_example(linked):
 
 
 def test_the_example_lines(linked):  # design order, 2-space indent, as in EXPECTED_SOC_A
-	body = EXPECTED_SOC_A.split("\n\n", 1)[1]
+	body = EXPECTED_SOC_A.rsplit("\n\n", 1)[1]
 	assert _instance_lines(linked) == body[: -len("endmodule\n")]
 
 
