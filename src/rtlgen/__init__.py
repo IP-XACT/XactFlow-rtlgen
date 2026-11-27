@@ -97,8 +97,9 @@ def _check_name(name, what):
 
 def _instance_lines(linked):
 	"""Each instance, in design order: '  <module> <instance> ();', with its module parameters
-	one per line in '#( ... )' and its connected ports one per line in '( ... )', in the
-	component's port order, when it has any (steps 2 to 4)."""
+	one per line in '#( ... )' and its ports one per line in '( ... )', in the component's port
+	order, when it has any (steps 2 to 4): a connected port with its net, an open one as
+	'.<port>()' (step 7a, _open_port)."""
 	_, ports = _ad_hoc_nets(linked)
 	_, bus_ports = _bus_nets(linked)
 	lines = ""
@@ -107,17 +108,19 @@ def _instance_lines(linked):
 			instance.instance_name,
 			f"instance name '{instance.instance_name}' in design {linked.vlnv}",
 		)
+		_check_required_interfaces(linked, instance)
 		instantiation = _instance_instantiation(instance)
 		parameters = _module_parameter_lines(instance, instantiation)
 		connected = {
 			**ports.get(instance.instance_name, {}),
 			**bus_ports.get(instance.instance_name, {}),
 		}
-		port_lines = [
-			f"    .{port.name}({connected[port.name]})"
-			for port in instance.component.model.ports
-			if port.name in connected
-		]
+		port_lines = []
+		for port in instance.component.model.ports:
+			if port.name in connected:
+				port_lines.append(f"    .{port.name}({connected[port.name]})")
+			elif _open_port(instance, port):
+				port_lines.append(f"    .{port.name}()")
 		lines += f"  {instantiation.module_name}"
 		if parameters:
 			lines += " #(\n" + ",\n".join(parameters) + "\n  )"
@@ -127,6 +130,48 @@ def _instance_lines(linked):
 		else:
 			lines += " ();\n"
 	return lines
+
+
+def _open_port(instance, port):
+	"""Whether an open port of an instance, one that no connection reaches, is written as
+	'.<port>()' (step 7a). An output or an inout is. A phantom port is left out, as it is not in
+	the module. An input is refused, as it would float, and so are a port that is not a wire
+	port and an array port, which rtlgen can't write yet."""
+	where = f"port '{port.name}' of instance '{instance.instance_name}'"
+	if port.wire is None:
+		raise ValueError(
+			f"{where} is not a wire port: transactional and structured ports are not supported yet"
+		)
+	if port.wire.direction is ipxact.Direction.PHANTOM:
+		return False
+	if port.arrays:
+		raise ValueError(f"{where} is an array: port arrays are not supported yet")
+	_check_name(port.name, f"port name '{port.name}' of instance '{instance.instance_name}'")
+	if port.wire.direction is ipxact.Direction.IN:
+		raise ValueError(
+			f"{where} is an input that no connection reaches, so it would float: connect it, "
+			"or tie it with an ad hoc connection's tiedValue (a value, 'default' or 'open')"
+		)
+	return True
+
+
+def _check_required_interfaces(linked, instance):
+	"""Refuse a bus interface of an instance with connectionRequired that no interconnection
+	uses (step 7a): IEEE 1685-2022 6.7.1.2 says the integration is then not valid, and xactflow
+	does not check it (SCR 2.15)."""
+	used = {
+		end.bus_interface.name
+		for interconnection in linked.interconnections
+		for end in interconnection.endpoints
+		if end.instance.instance_name == instance.instance_name
+	}
+	for bus_interface in instance.component.bus_interfaces:
+		if bus_interface.connection_required and bus_interface.name not in used:
+			raise ValueError(
+				f"bus interface '{bus_interface.name}' of instance '{instance.instance_name}' "
+				"requires a connection (connectionRequired), but no interconnection uses it: "
+				"IEEE 1685-2022 6.7.1.2 makes the design not valid"
+			)
 
 
 def _ad_hoc_keys(linked, name):

@@ -73,6 +73,11 @@ def test_top_port_named_like_an_instance_is_refused(linked):
 
 def test_module_without_ports_has_no_parentheses(library, linked, tmp_path):  # decision 12
 	linked.component.model.ports = []
+	for connection in linked.design.ad_hoc_connections:
+		if connection.external_port_references:  # the instance ports it reaches would be open
+			for reference in linked.ad_hoc_connections[connection.name]:  # (step 7a)
+				ports = reference.instance.component.model.ports
+				ports[:] = [port for port in ports if port.name != reference.port.name]
 	linked.design.ad_hoc_connections = [
 		a for a in linked.design.ad_hoc_connections if not a.external_port_references
 	]

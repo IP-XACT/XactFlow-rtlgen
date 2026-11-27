@@ -51,6 +51,11 @@ def test_nets_follow_the_first_ends_port_maps(linked):  # decision 10
 
 
 def test_design_without_interconnections_has_no_bus_wires(library, linked, tmp_path):
+	for interconnection in linked.interconnections:  # their ports would be open (step 7a)
+		for end in interconnection.endpoints:
+			mapped = {m.physical_port for m in end.bus_interface.abstraction_types[0].port_maps}
+			ports = end.instance.component.model.ports
+			ports[:] = [port for port in ports if port.name not in mapped]
 	linked.design.interconnections = []
 	RtlExporter().export(library, tmp_path)
 	text = (tmp_path / "soc_a.sv").read_text()
