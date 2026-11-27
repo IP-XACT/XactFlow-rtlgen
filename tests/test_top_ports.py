@@ -97,4 +97,4 @@ def test_top_port_that_does_not_match_its_net_is_refused(linked, left, right, me
 
 def test_top_port_with_other_bound_of_the_same_width_is_accepted(linked):
 	_top_port(linked, "gpio_i").wire.vectors = [_vector("16", "1")]
-	assert _ad_hoc_nets(linked)[1]["gpio"]["gpio_i"] == "gpio_i"
+	assert _ad_hoc_nets(linked)[1]["gpio"]["gpio_i"] == {None: "gpio_i"}

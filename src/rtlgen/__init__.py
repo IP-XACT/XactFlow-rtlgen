@@ -55,8 +55,9 @@ class RtlExporter(xactflow.Exporter):
 		port_lines = _top_port_lines(linked)
 		instances = _instance_lines(linked)
 		nets, _ = _ad_hoc_nets(linked)
+		_, unused = _port_connections(linked)
 		groups, _ = _bus_nets(linked)
-		net_lines = "".join(_wire_line(net, width) for net, width in nets)
+		net_lines = "".join(_wire_line(net, width) for net, width in nets + unused)
 		for name, bus in groups:
 			net_lines += f"\n  // {name}\n" + "".join(_wire_line(net, width) for net, width in bus)
 		if net_lines:
@@ -106,12 +107,10 @@ def _check_name(name, what):
 def _instance_lines(linked):
 	"""Each instance, in design order: '  <module> <instance> ();', with its module parameters
 	one per line in '#( ... )' and its ports one per line in '( ... )', in the component's port
-	order, when it has any (steps 2 to 4): a connected port with its net, a tied one with its
-	constant, or as '.<port>()' when tied 'open' (step 7c, _ties), an open one as '.<port>()'
-	(step 7a, _open_port)."""
-	_, ports = _ad_hoc_nets(linked)
-	_, bus_ports = _bus_nets(linked)
-	ties, _ = _ties(linked)
+	order, when it has any (steps 2 to 4): a connected or tied port with what _port_connections
+	gives (a net, a constant, a concatenation for a port connected in parts), an open one as
+	'.<port>()' (step 7a, _open_port)."""
+	connections, _ = _port_connections(linked)
 	lines = ""
 	for instance in linked.instances.values():
 		_check_name(
@@ -121,11 +120,7 @@ def _instance_lines(linked):
 		_check_required_interfaces(linked, instance)
 		instantiation = _instance_instantiation(instance)
 		parameters = _module_parameter_lines(instance, instantiation)
-		connected = {
-			**ports.get(instance.instance_name, {}),
-			**bus_ports.get(instance.instance_name, {}),
-			**ties.get(instance.instance_name, {}),
-		}
+		connected = connections.get(instance.instance_name, {})
 		port_lines = []
 		for port in instance.component.model.ports:
 			if port.name in connected:
@@ -141,6 +136,104 @@ def _instance_lines(linked):
 		else:
 			lines += " ();\n"
 	return lines
+
+
+def _port_connections(linked):
+	"""What each instance port is connected to (steps 4 to 7d), instance name -> {port name ->
+	expression}, and the (name, width) of each unused wire to declare for open bits of a port
+	connected in parts (step 7d decisions 5 and 6), in instance and port order. A port connected
+	whole is written with its net or constant, and one connected in parts with a concatenation
+	(_port_expression)."""
+	nets, ad_hoc = _ad_hoc_nets(linked)
+	groups, bus = _bus_nets(linked)
+	ties, _ = _ties(linked)
+	model = linked.component.model or ipxact.Model()
+	taken = {
+		port.name: f"top port '{port.name}'" for port in model.ports
+		if port.wire is None or port.wire.direction is not ipxact.Direction.PHANTOM
+	}
+	taken.update({name: f"instance '{name}'" for name in linked.instances})
+	taken.update({net: f"ad hoc net '{net}'" for net, width in nets})
+	for interconnection, bus_nets in groups:
+		taken.update({net: f"bus net '{net}'" for net, width in bus_nets})
+	connections = {}
+	unused = []
+	for instance in linked.instances.values():
+		name = instance.instance_name
+		for port in instance.component.model.ports:
+			pieces = {
+				**ad_hoc.get(name, {}).get(port.name, {}),
+				**ties.get(name, {}).get(port.name, {}),
+			}
+			if port.name in bus.get(name, {}):
+				pieces[None] = bus[name][port.name]
+			if pieces:
+				expression = _port_expression(instance, port, pieces, unused, taken)
+				connections.setdefault(name, {})[port.name] = expression
+	return connections, unused
+
+
+def _port_expression(instance, port, pieces, unused, taken):
+	"""What an instance port is connected to, from its pieces, {bits: expression}, where bits is
+	None for the whole port or the (left, right) a connection selects (_selection): the whole
+	port's expression, or a concatenation of the pieces from the port's left bit down (step 7d
+	decision 1). A run of bits that no connection reaches is refused on an input, as it would
+	float, and gets an unused wire on an output or inout (decision 5), as do bits tied 'open'
+	(expression None, decision 6)."""
+	if None in pieces:
+		return pieces[None]
+	name = instance.instance_name
+	left, right = _port_range(port, _resolver(instance), f"instance '{name}'")
+	step = -1 if left > right else 1
+	order = list(range(left, right + step, step))
+	owner = {}
+	for bits in pieces:
+		for bit in range(bits[0], bits[1] + step, step):
+			owner[bit] = bits
+	parts = []
+	index = 0
+	while index < len(order):
+		bits = owner.get(order[index])
+		if bits is None:  # bits that no connection reaches
+			end = index
+			while end + 1 < len(order) and order[end + 1] not in owner:
+				end += 1
+			bits = (order[index], order[end])
+			if port.wire.direction is ipxact.Direction.IN:
+				raise ValueError(
+					f"{_port_text(name, port.name, bits)}, an input, are reached by no connection, "
+					"so they would float: connect them, or tie them with an ad hoc connection's "
+					"tiedValue"
+				)
+			parts.append(_unused_wire(name, port.name, bits, unused, taken))
+		elif pieces[bits] is None:  # tied 'open'
+			parts.append(_unused_wire(name, port.name, bits, unused, taken))
+		else:
+			parts.append(pieces[bits])
+		index += abs(bits[0] - bits[1]) + 1
+	return "{" + ", ".join(parts) + "}"
+
+
+def _unused_wire(instance, port, bits, unused, taken):
+	"""The unused wire '<instance>_<port>_<left>_<right>' that fills open bits of a port
+	connected in parts (step 7d decisions 5 and 6), added to unused. A name that another one in
+	the module has (taken) is refused."""
+	name = f"{instance}_{port}_{bits[0]}_{bits[1]}"
+	what = f"the unused wire '{name}' for {_port_text(instance, port, bits)}"
+	if name in taken:
+		raise ValueError(
+			f"{what} has the same name as {taken[name]}: they would clash in the module"
+		)
+	taken[name] = what
+	unused.append((name, abs(bits[0] - bits[1]) + 1))
+	return name
+
+
+def _port_text(instance, port, bits):
+	""""port '<port>' of instance '<instance>'", led by "bits [<left>:<right>] of " for part of
+	it."""
+	text = f"port '{port}' of instance '{instance}'"
+	return text if bits is None else f"bits [{bits[0]}:{bits[1]}] of {text}"
 
 
 def _open_port(instance, port):
@@ -198,14 +291,74 @@ def _ad_hoc_references(linked, name):
 
 
 def _ad_hoc_keys(linked, name):
-	"""The ports an ad hoc connection touches, as keys: (instance name, port name) for an
-	instance's port, (None, port name) for a top port."""
+	"""The ports an ad hoc connection touches, as keys: (instance name, port name, bits) for an
+	instance's port, where bits is None for the whole port or the (left, right) the connection
+	selects (_selection), and (None, port name, None) for a top port."""
 	keys = []
 	for reference in _ad_hoc_references(linked, name):
-		keys.append((reference.instance.instance_name, reference.port.name))
+		_check_reference(name, reference)
+		bits = _selection(linked, name, reference)
+		keys.append((reference.instance.instance_name, reference.port.name, bits))
 	for external in linked.ad_hoc_external_ports.get(name, []):
-		keys.append((None, external.port.name))
+		keys.append((None, external.port.name, None))
 	return keys
+
+
+def _selection(linked, connection, reference):
+	"""The bits of its port that a port reference of an ad hoc connection selects (step 7d
+	decision 3): None for the whole port, or (left, right) in the port's numbering. The range is
+	in the design, so its bounds are worked out with the design's parameters (IEEE 1685-2022
+	E.3.7). They must be whole numbers inside the port's bounds, running the same way as them
+	(decision 2), or one bit. A range that covers the whole port is the whole port. Indices, a
+	partSelect with no range and one on a port with no vector are refused."""
+	part_select = reference.source.part_select
+	if part_select is None:
+		return None
+	instance = reference.instance.instance_name
+	where = (
+		f"ad hoc connection '{connection}' takes part of port '{reference.port.name}' of "
+		f"instance '{instance}'"
+	)
+	if part_select.indices:
+		raise ValueError(
+			f"{where} by indices (partSelect): indices pick array elements, and port arrays are "
+			"not supported yet"
+		)
+	if part_select.range is None:
+		raise ValueError(f"{where}, but its partSelect has no range")
+	bounds = _port_range(reference.port, _resolver(reference.instance), f"instance '{instance}'")
+	if bounds is None:
+		raise ValueError(f"{where}, but the port is one bit with no range to select from")
+	resolve = xactflow.parameter_resolver(linked.design.parameters)
+	selected = []
+	for side, expression in (("left", part_select.range.left), ("right", part_select.range.right)):
+		try:
+			value = xactflow.evaluate(expression, resolve)
+		except xactflow.ExpressionError as error:
+			raise ValueError(
+				f"{where}: the {side} bound of its range, {expression.value}, cannot be worked "
+				f"out: {error}"
+			) from error
+		if not isinstance(value, int) or value < 0:
+			raise ValueError(
+				f"{where}: the {side} bound of its range, {expression.value}, works out to "
+				f"{value!r}, not a whole number of 0 or more"
+			)
+		selected.append(value)
+	left, right = selected
+	low, high = sorted(bounds)
+	if not (low <= left <= high and low <= right <= high):
+		raise ValueError(
+			f"{where} [{left}:{right}], outside the port's bounds [{bounds[0]}:{bounds[1]}]"
+		)
+	if left != right and (left > right) != (bounds[0] > bounds[1]):
+		raise ValueError(
+			f"{where} [{left}:{right}], which runs against the port's [{bounds[0]}:{bounds[1]}]: "
+			"not supported"
+		)
+	if (left, right) == tuple(bounds):
+		return None
+	return (left, right)
 
 
 def _ad_hoc_groups(linked):
@@ -245,9 +398,10 @@ def _tied_connections(linked):
 
 
 def _check_tied_ports(linked):
-	"""Refuse a port that a tied ad hoc connection ties and that another ad hoc connection also
-	reaches, tied or not (step 7c decision 6): a port takes one expression, and the standard does
-	not say which would win. A tied port on a bus net is refused in _bus_nets."""
+	"""Refuse a port, or bits of it, that a tied ad hoc connection ties and that another ad hoc
+	connection also reaches at the same bits, tied or not (step 7c decision 6, by bits since step
+	7d): a port takes one expression, and the standard does not say which would win. Bits that
+	partly overlap are refused in _check_overlaps, and a tied port on a bus net in _bus_nets."""
 	tied = _tied_connections(linked)
 	owners = {}
 	for name in _ad_hoc_names(linked):
@@ -258,27 +412,63 @@ def _check_tied_ports(linked):
 		for key in _ad_hoc_keys(linked, name):
 			owner = owners.get(key)
 			if owner is not None and owner != name:
-				instance, port = key
+				instance, port, bits = key
 				if instance is None:
 					where = f"top port '{port}'"
 				else:
-					where = f"port '{port}' of instance '{instance}'"
+					where = _port_text(instance, port, bits)
+				verb = "is" if bits is None else "are"
 				raise ValueError(
-					f"{where} is tied by ad hoc connection '{owner}' and is also in ad hoc "
+					f"{where} {verb} tied by ad hoc connection '{owner}' and {verb} also in ad hoc "
 					f"connection '{name}': a tied port can't be in another connection"
 				)
 
 
+def _check_overlaps(linked):
+	"""Refuse ad hoc connections that reach one instance port at bits that partly overlap (step
+	7d decision 4): connections at the same bits are one net (_ad_hoc_groups), and ones at
+	separate bits are joined at the port (_port_expression), but the standard does not say what
+	a partial overlap means. A port connected whole overlaps every part of it."""
+	reached = {}
+	for name in _ad_hoc_names(linked):
+		for instance, port, bits in _ad_hoc_keys(linked, name):
+			if instance is None:
+				continue
+			ranges = reached.setdefault((instance, port), {})
+			for other, first in ranges.items():
+				if other == bits:
+					continue
+				whole = other is None or bits is None
+				if whole or max(min(other), min(bits)) <= min(max(other), max(bits)):
+					who = (
+						f"ad hoc connection '{name}' reaches" if first == name
+						else f"ad hoc connections '{first}' and '{name}' reach"
+					)
+					raise ValueError(
+						f"{who} port '{port}' of instance '{instance}' at bits that partly overlap "
+						f"({_range_text(other)} and {_range_text(bits)}): only the same bits or "
+						"separate ones are supported"
+					)
+			ranges.setdefault(bits, name)
+
+
+def _range_text(bits):
+	"""'[<left>:<right>]', or 'the whole port' for None."""
+	return "the whole port" if bits is None else f"[{bits[0]}:{bits[1]}]"
+
+
 def _ad_hoc_nets(linked):
 	"""The ad hoc nets (steps 4 and 5): the (net name, width) of each net to declare as a wire,
-	in design order, and instance name -> {port name -> net name}. Connections that share a
-	port are one net (_ad_hoc_groups); a port listed twice is written once. A net that reaches
-	a top port is that port: it takes the port's name and is not declared, as the module header
-	declares it. A net that reaches two top ports is refused. Any other net is named after its
-	first connection in design order. The instance ports on a net must have the same width and
-	bit order. Any mix of directions is accepted (the nets are wires). A tied connection makes
-	no net (_ties), and a port it ties may be in no other connection (_check_tied_ports). What
-	rtlgen can't write yet is refused in _check_reference and _check_external."""
+	in design order, and instance name -> {port name -> {bits -> net name}}, with bits None for
+	the whole port (_selection). Connections that share a port at the same bits are one net
+	(_ad_hoc_groups), and bits that partly overlap are refused (_check_overlaps); a port listed
+	twice is written once. A net that reaches a top port is that port: it takes the port's name
+	and is not declared, as the module header declares it. A net that reaches two top ports is
+	refused. Any other net is named after its first connection in design order. The instance
+	ports on a net must have the same width and bit order. Any mix of directions is accepted
+	(the nets are wires). A tied connection makes no net (_ties), and a port it ties may be in
+	no other connection (_check_tied_ports). What rtlgen can't write yet is refused in
+	_check_reference and _check_external."""
 	nets = []
 	ports = {}
 	sources = {}
@@ -289,6 +479,7 @@ def _ad_hoc_nets(linked):
 				"names must be unique"
 			)
 		sources[ad_hoc.name] = ad_hoc
+	_check_overlaps(linked)
 	_check_tied_ports(linked)
 	model = linked.component.model or ipxact.Model()
 	top_resolve = xactflow.parameter_resolver(linked.component.parameters)
@@ -326,15 +517,17 @@ def _ad_hoc_nets(linked):
 					"instance would clash in the module"
 				)
 		references = []
+		selections = []
 		for member in group:
 			for reference in _ad_hoc_references(linked, member):
 				_check_reference(member, reference)
+				references.append(reference)
+				selections.append(_selection(linked, member, reference))
 			for external in linked.ad_hoc_external_ports.get(member, []):
 				_check_external(member, external)
-			references.extend(_ad_hoc_references(linked, member))
 		shapes = []
-		for reference in references:
-			bounds = _port_range(
+		for reference, bits in zip(references, selections):
+			bounds = bits if bits is not None else _port_range(
 				reference.port,
 				_resolver(reference.instance),
 				f"instance '{reference.instance.instance_name}'",
@@ -404,8 +597,9 @@ def _ad_hoc_nets(linked):
 				)
 		if not top_ports:
 			nets.append((name, width))
-		for reference in references:
-			ports.setdefault(reference.instance.instance_name, {})[reference.port.name] = name
+		for reference, bits in zip(references, selections):
+			instance_ports = ports.setdefault(reference.instance.instance_name, {})
+			instance_ports.setdefault(reference.port.name, {})[bits] = name
 	for member in _tied_connections(linked):  # tied to a value, or left open on purpose (step 7c)
 		for external in linked.ad_hoc_external_ports.get(member, []):
 			reached.add(external.port.name)
@@ -420,13 +614,15 @@ def _ad_hoc_nets(linked):
 
 
 def _ties(linked):
-	"""The ports that the tied ad hoc connections tie (step 7c), in design order: instance name
-	-> {port name -> what it is connected to}, and top output -> constant for each assign to
-	write. A value or 'default' ties an instance input to a sized constant (_tie_constant), or
-	drives a top output through an assign; a value on any other port is refused, as something
-	else drives that port (decision 3). 'open' leaves any port open on purpose: an instance port
-	is written as '.<port>()' and a top port is left unconnected (decision 4). A tied port is in
-	no other connection (_check_tied_ports, _bus_nets)."""
+	"""The ports that the tied ad hoc connections tie (steps 7c, 7d), in design order: instance
+	name -> {port name -> {bits -> what they are connected to}}, with bits None for the whole
+	port (_selection) and None for bits of a port tied 'open' (an unused wire, step 7d decision
+	6), and top output -> constant for each assign to write. A value or 'default' ties an
+	instance input to a sized constant (_tie_constant), or drives a top output through an
+	assign; a value on any other port is refused, as something else drives that port (decision
+	3). 'open' leaves any port open on purpose: an instance port is written as '.<port>()' and a
+	top port is left unconnected (decision 4). A tied port is in no other connection
+	(_check_tied_ports, _bus_nets)."""
 	ports = {}
 	assigns = {}
 	top_resolve = xactflow.parameter_resolver(linked.component.parameters)
@@ -437,11 +633,12 @@ def _ties(linked):
 		is_open = connection.tied_value.value.strip() == "open"
 		for reference in _ad_hoc_references(linked, name):
 			_check_reference(name, reference)
+			bits = _selection(linked, name, reference)
 			instance = reference.instance.instance_name
-			where = f"port '{reference.port.name}' of instance '{instance}'"
+			where = _port_text(instance, reference.port.name, bits)
 			direction = reference.port.wire.direction
 			if is_open:
-				constant = ""
+				constant = "" if bits is None else None
 			elif direction is not ipxact.Direction.IN:
 				kind = "an output" if direction is ipxact.Direction.OUT else "an inout"
 				raise ValueError(
@@ -450,10 +647,10 @@ def _ties(linked):
 				)
 			else:
 				constant = _tie_constant(
-					linked, connection, reference.port, _resolver(reference.instance),
+					linked, connection, reference.port, bits, _resolver(reference.instance),
 					f"instance '{instance}'", where,
 				)
-			ports.setdefault(instance, {})[reference.port.name] = constant
+			ports.setdefault(instance, {}).setdefault(reference.port.name, {})[bits] = constant
 		for external in linked.ad_hoc_external_ports.get(name, []):
 			_check_external(name, external)
 			if is_open:
@@ -468,23 +665,29 @@ def _ties(linked):
 					"the module"
 				)
 			assigns[external.port.name] = _tie_constant(
-				linked, connection, external.port, top_resolve,
+				linked, connection, external.port, None, top_resolve,
 				f"component {linked.component.vlnv}", where,
 			)
 	return ports, assigns
 
 
-def _tie_constant(linked, connection, port, resolve, owner, where):
-	"""The sized constant a tied connection ties a port to (step 7c decisions 2, 5 and 7): its
-	tiedValue, or for 'default' the port's own default value, worked out with resolve, the
-	owner's parameters. The value must work out to a whole number from 0 to 2^W - 1 for a port
-	of W bits, and is written in hex ('16'hff'), or in binary for one bit ('1'b0'). A fill
-	literal ('0, '1, 'x, 'z), a real or negative number, a value too big for the port, and one
-	that can't be worked out are refused: SCR 14.1 makes a tie value an unsigned bit vector."""
-	bounds = _port_range(port, resolve, owner)
+def _tie_constant(linked, connection, port, bits, resolve, owner, where):
+	"""The sized constant a tied connection ties a port, or the bits of it it selects, to (step
+	7c decisions 2, 5 and 7, step 7d decision 6): its tiedValue, or for 'default' the port's own
+	default value, worked out with resolve, the owner's parameters. The value must work out to a
+	whole number from 0 to 2^W - 1 for W bits (SCR 14.1: the port slice's width), and is written
+	in hex ('16'hff'), or in binary for one bit ('1'b0'). A fill literal ('0, '1, 'x, 'z), a real
+	or negative number, a value too big for the port, and one that can't be worked out are
+	refused: SCR 14.1 makes a tie value an unsigned bit vector."""
+	bounds = bits if bits is not None else _port_range(port, resolve, owner)
 	width = 1 if bounds is None else abs(bounds[0] - bounds[1]) + 1
 	ties = f"ad hoc connection '{connection.name}' ties {where} ({width} bit{'s' * (width > 1)})"
 	text = connection.tied_value.value.strip()
+	if text == "default" and bits is not None:
+		raise ValueError(
+			f"{ties} to its default value ('default'): the default value of part of a port is not "
+			"supported yet"
+		)
 	if text == "default":
 		text = _default_value(port, ties)
 		ties += f" to its default value {text}"
@@ -563,7 +766,7 @@ def _bus_nets(linked):
 	ad_hoc_ports = {}
 	for connection in _ad_hoc_names(linked):
 		for key in _ad_hoc_keys(linked, connection):
-			ad_hoc_ports.setdefault(key, connection)
+			ad_hoc_ports.setdefault(key[:2], connection)
 	tied = _tied_connections(linked)
 	for monitor in linked.monitor_interconnections:
 		raise ValueError(
@@ -795,12 +998,6 @@ def _check_reference(connection, reference):
 			f"ad hoc connection '{connection}' connects port '{reference.port.name}' "
 			f"of instance '{reference.instance.instance_name}', which is "
 			"an array: port arrays are not supported yet"
-		)
-	if reference.source.part_select is not None:
-		raise ValueError(
-			f"ad hoc connection '{connection}' takes a part of port '{reference.port.name}' "
-			f"of instance '{reference.instance.instance_name}' (partSelect): "
-			"part selects are not supported yet"
 		)
 	if reference.source.sub_port_refs:
 		raise ValueError(

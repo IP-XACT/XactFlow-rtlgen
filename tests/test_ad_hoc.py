@@ -37,7 +37,7 @@ def test_ports_in_component_order(linked):
 
 def test_connection_to_a_top_port_is_written_to_the_port(linked):
 	nets, ports = _ad_hoc_nets(linked)
-	assert ports["cpu"]["clk_i"] == "clk_i"
+	assert ports["cpu"]["clk_i"] == {None: "clk_i"}
 	assert "clk_i" not in [net for net, width in nets]
 
 
@@ -86,9 +86,9 @@ def test_connections_sharing_a_port_are_one_net(linked):
 	linked.ad_hoc_connections[DEBUG].append(_reference(linked, IRQ, "irq_i"))
 	nets, ports = _ad_hoc_nets(linked)
 	assert nets == [(IRQ, 1)]
-	assert ports["cpu"]["irq_i"] == IRQ
-	assert ports["cpu"]["debug_req_i"] == IRQ
-	assert ports["debug"]["debug_req_o"] == IRQ
+	assert ports["cpu"]["irq_i"] == {None: IRQ}
+	assert ports["cpu"]["debug_req_i"] == {None: IRQ}
+	assert ports["debug"]["debug_req_o"] == {None: IRQ}
 
 
 def test_a_later_connection_joins_two_nets(linked):
@@ -108,8 +108,8 @@ def test_net_sharing_a_port_with_a_top_port_connection_joins_its_net(linked):
 	_port(linked, "uart", "irq_o").wire.direction = ipxact.Direction.IN
 	linked.ad_hoc_connections[IRQ].append(_reference(linked, "clk_i_to_cpu_clk_i", "clk_i"))
 	nets, ports = _ad_hoc_nets(linked)
-	assert ports["uart"]["irq_o"] == "clk_i"
-	assert ports["cpu"]["irq_i"] == "clk_i"
+	assert ports["uart"]["irq_o"] == {None: "clk_i"}
+	assert ports["cpu"]["irq_i"] == {None: "clk_i"}
 	assert IRQ not in [net for net, width in nets]
 
 
@@ -139,12 +139,6 @@ def test_port_array_is_refused(linked):
 		ipxact.ArrayBound(left=ipxact.Expression(value="3"), right=ipxact.Expression(value="0"))
 	]
 	with pytest.raises(ValueError, match="an array"):
-		_ad_hoc_nets(linked)
-
-
-def test_part_select_is_refused(linked):
-	_reference(linked, IRQ, "irq_i").source.part_select = ipxact.PartSelect()
-	with pytest.raises(ValueError, match="partSelect"):
 		_ad_hoc_nets(linked)
 
 
@@ -233,7 +227,7 @@ def test_top_output_driven_through_another_connection_is_accepted(linked):  # me
 		dataclasses.replace(_reference(linked, IRQ, "irq_i"), port=_port(linked, "cpu", "pready_i"))
 	]
 	linked.ad_hoc_external_ports["tx_tap"] = list(linked.ad_hoc_external_ports[TX])
-	assert _ad_hoc_nets(linked)[1]["cpu"]["pready_i"] == "uart_tx_o"
+	assert _ad_hoc_nets(linked)[1]["cpu"]["pready_i"] == {None: "uart_tx_o"}
 
 
 def _add_top_port(linked, name, direction):
