@@ -30,7 +30,7 @@ def _reference(linked, connection, port_name):
 
 
 def test_ports_in_component_order(linked):
-	linked.ad_hoc_connections = dict(reversed(list(linked.ad_hoc_connections.items())))
+	linked.design.ad_hoc_connections.reverse()
 	lines = _instance_lines(linked)
 	assert lines.index(".irq_i(") < lines.index(".debug_req_i(")
 
@@ -151,13 +151,6 @@ def test_part_select_is_refused(linked):
 def test_sub_port_reference_is_refused(linked):
 	_reference(linked, IRQ, "irq_i").source.sub_port_refs = [ipxact.SubPortReference(sub_port_ref="x")]
 	with pytest.raises(ValueError, match="subPortReference"):
-		_ad_hoc_nets(linked)
-
-
-def test_tied_value_is_refused(linked):
-	connection = next(a for a in linked.design.ad_hoc_connections if a.name == IRQ)
-	connection.tied_value = ipxact.Expression(value="0")
-	with pytest.raises(ValueError, match="tiedValue"):
 		_ad_hoc_nets(linked)
 
 
@@ -288,8 +281,13 @@ def test_sub_port_reference_on_a_top_port_is_refused(linked):  # decision 11
 		_ad_hoc_nets(linked)
 
 
-def test_tied_value_on_a_top_port_connection_is_refused(linked):  # decision 11
-	connection = next(a for a in linked.design.ad_hoc_connections if a.name == TX)
-	connection.tied_value = ipxact.Expression(value="0")
-	with pytest.raises(ValueError, match=f"ad hoc connection '{TX}' has a tiedValue"):
-		_ad_hoc_nets(linked)
+def test_connection_between_top_ports_only_is_refused(library, tmp_path):
+	"""A connection that reaches no instance port is not in linked.ad_hoc_connections, but it is
+	still a net (step 7c)."""
+	design = next(library.targets(ipxact.Design))
+	tx = next(a for a in design.ad_hoc_connections if a.name == TX)
+	rx = next(a for a in design.ad_hoc_connections if a.name == RX)
+	tx.internal_port_references = []
+	tx.external_port_references += rx.external_port_references
+	with pytest.raises(ValueError, match="joins top ports 'uart_tx_o', 'uart_rx_i'"):
+		RtlExporter().export(library, tmp_path)
